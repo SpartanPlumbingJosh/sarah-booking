@@ -1,0 +1,33 @@
+const express = require('express');
+const app = express();
+
+app.use(express.json());
+
+// Import handlers
+const checkCustomer = require('./api/check-customer');
+const checkAvailability = require('./api/check-availability');
+const bookAppointment = require('./api/book-appointment');
+const postCall = require('./api/post-call');
+const health = require('./api/health');
+
+// Wrap Vercel handlers for Express
+const wrap = (handler) => async (req, res) => {
+  try {
+    await handler(req, res);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Routes
+app.all('/api/check-customer', wrap(checkCustomer));
+app.all('/api/check-availability', wrap(checkAvailability));
+app.all('/api/book-appointment', wrap(bookAppointment));
+app.all('/api/post-call', wrap(postCall));
+app.all('/api/health', wrap(health));
+app.get('/health', wrap(health));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'sarah-booking' }));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Running on port ${PORT}`));

@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "name": "sarah-booking",
+  "builds": [
+    { "src": "api/*.js", "use": "@vercel/node" }
+  ],
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/", "dest": "/api/health" }
+  ]
+}

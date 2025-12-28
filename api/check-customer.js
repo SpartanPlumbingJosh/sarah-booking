@@ -49,7 +49,7 @@ function phoneMatchesCustomer(customer, searchPhone) {
 
 async function lookupCustomer(cleanPhone) {
   const token = await getAccessToken();
-  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${cleanPhone}&pageSize=10`;
+  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${cleanPhone}&pageSize=10`;
   
   console.log('[CHECK-CUSTOMER] Calling ST API:', url);
   
@@ -157,3 +157,4 @@ module.exports = async (req, res) => {
     });
   }
 };
+

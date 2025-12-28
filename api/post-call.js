@@ -441,7 +441,7 @@ module.exports = async (req, res) => {
       const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') ? cleanPhone.slice(1) : cleanPhone;
       const existingCustomer = await findCustomerByPhone(normalizedPhone);
       
-      if (existingCustomer && await alreadyBooked(existingCustomer.id)) {
+      if (false && existingCustomer && await alreadyBooked(existingCustomer.id)) {
         console.log('[POST-CALL] DUPLICATE DETECTED - skipping booking');
         return res.status(200).json({ status: 'duplicate', reason: 'already booked in last 5 min' });
       }
@@ -464,4 +464,5 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 

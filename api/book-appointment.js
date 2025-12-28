@@ -12,7 +12,6 @@ const CONFIG = {
   JOB_TYPE_DRAIN: 79265910,
   CAMPAIGN_ID: 313,
   
-  // Eastern time windows (local hours)
   ARRIVAL_WINDOWS: {
     morning: { startHour: 8, endHour: 11 },
     midday: { startHour: 11, endHour: 14 },
@@ -55,7 +54,6 @@ async function stApi(method, endpoint, body = null) {
   if (body) options.body = JSON.stringify(body);
   
   console.log('[ST API]', method, endpoint);
-  if (body) console.log('[ST API] Body:', JSON.stringify(body, null, 2));
   
   const response = await fetch(`https://api.servicetitan.io${endpoint}`, options);
   const responseText = await response.text();
@@ -68,23 +66,31 @@ async function stApi(method, endpoint, body = null) {
   return JSON.parse(responseText);
 }
 
-/**
- * Check if DST is in effect for US Eastern timezone on a given date
- * DST: 2nd Sunday in March to 1st Sunday in November
- */
+// ALWAYS look up customer by phone first - don't rely on Sarah passing customer_id
+async function findCustomerByPhone(phone) {
+  try {
+    const result = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${phone}&pageSize=5`);
+    if (result.data && result.data.length > 0) {
+      const customer = result.data[0];
+      console.log('[BOOK] Found existing customer:', customer.id, customer.name);
+      return customer;
+    }
+  } catch (error) {
+    console.error('[BOOK] Customer lookup failed:', error.message);
+  }
+  return null;
+}
+
 function isDSTinEffect(year, month, day) {
-  // month is 1-indexed (1=Jan, 12=Dec)
-  if (month < 3 || month > 11) return false; // Jan, Feb, Dec = no DST
-  if (month > 3 && month < 11) return true;  // Apr-Oct = DST
+  if (month < 3 || month > 11) return false;
+  if (month > 3 && month < 11) return true;
   
-  // March: DST starts 2nd Sunday at 2 AM
   if (month === 3) {
     const firstDayOfMarch = new Date(Date.UTC(year, 2, 1)).getUTCDay();
     const secondSunday = firstDayOfMarch === 0 ? 8 : 15 - firstDayOfMarch;
     return day >= secondSunday;
   }
   
-  // November: DST ends 1st Sunday at 2 AM
   if (month === 11) {
     const firstDayOfNov = new Date(Date.UTC(year, 10, 1)).getUTCDay();
     const firstSunday = firstDayOfNov === 0 ? 1 : 8 - firstDayOfNov;
@@ -94,15 +100,10 @@ function isDSTinEffect(year, month, day) {
   return false;
 }
 
-/**
- * Convert Eastern time to UTC ISO string
- * Railway runs in UTC, ServiceTitan expects UTC times with Z suffix
- */
 function easternToUTC(year, month, day, hour) {
-  const offset = isDSTinEffect(year, month, day) ? 4 : 5; // EDT=UTC-4, EST=UTC-5
+  const offset = isDSTinEffect(year, month, day) ? 4 : 5;
   const utcHour = hour + offset;
   
-  // Handle day rollover if UTC hour >= 24
   let finalDay = day;
   let finalMonth = month;
   let finalYear = year;
@@ -123,13 +124,9 @@ function easternToUTC(year, month, day, hour) {
   return `${finalYear}-${monthStr}-${dayStr}T${hourStr}:00:00Z`;
 }
 
-/**
- * Get next business day (Mon-Fri), optionally targeting a specific weekday
- */
 function getNextBusinessDay(preferredDay) {
   const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   
-  // Get current time in Eastern timezone
   const now = new Date();
   const easternNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
   
@@ -142,15 +139,12 @@ function getNextBusinessDay(preferredDay) {
       if (daysUntil <= 0) daysUntil += 7;
       targetDate.setDate(easternNow.getDate() + daysUntil);
     } else {
-      // Not a valid day name, default to next business day
       targetDate.setDate(easternNow.getDate() + 1);
     }
   } else {
-    // Default: tomorrow
     targetDate.setDate(easternNow.getDate() + 1);
   }
   
-  // Skip weekends
   while (targetDate.getDay() === 0 || targetDate.getDay() === 6) {
     targetDate.setDate(targetDate.getDate() + 1);
   }
@@ -167,7 +161,6 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   
   try {
-    // Parameter aliasing - accept both Retell tool schema and direct formats
     const first_name = req.body.first_name || (req.body.customer_name?.split(' ')[0]) || null;
     const last_name = req.body.last_name || (req.body.customer_name?.split(' ').slice(1).join(' ')) || '';
     const issue = req.body.issue || req.body.issue_description;
@@ -176,7 +169,6 @@ module.exports = async (req, res) => {
     const { phone, street, city, state, zip, time_window, customer_id } = req.body;
     
     console.log('[BOOK] Request:', JSON.stringify(req.body, null, 2));
-    console.log('[BOOK] Resolved: first_name=%s, last_name=%s, issue=%s, day=%s', first_name, last_name, issue, day);
     
     const missing = [];
     if (!first_name) missing.push('first name');
@@ -192,27 +184,40 @@ module.exports = async (req, res) => {
     }
     
     const cleanPhone = String(phone).replace(/\D/g, '');
+    const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
+      ? cleanPhone.slice(1) : cleanPhone;
     const customerName = last_name ? `${first_name} ${last_name}` : first_name;
     
     let customerId = customer_id;
     let locationId = null;
     
+    // ALWAYS try to find existing customer by phone first
     if (!customerId) {
+      const existingCustomer = await findCustomerByPhone(normalizedPhone);
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+      }
+    }
+    
+    if (!customerId) {
+      // No existing customer found - create new
+      console.log('[BOOK] Creating new customer:', customerName);
       const customerResult = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
         name: customerName,
         type: 'Residential',
         address: { street, city, state: state || 'OH', zip, country: 'USA' },
-        contacts: [{ type: 'MobilePhone', value: cleanPhone }],
+        contacts: [{ type: 'MobilePhone', value: normalizedPhone }],
         locations: [{
           name: customerName,
           address: { street, city, state: state || 'OH', zip, country: 'USA' },
-          contacts: [{ type: 'MobilePhone', value: cleanPhone }]
+          contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
         }]
       });
       
       customerId = customerResult.id;
       locationId = customerResult.locations[0].id;
     } else {
+      // Existing customer - get their location
       const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
       if (locations.data?.length > 0) {
         locationId = locations.data[0].id;
@@ -221,24 +226,17 @@ module.exports = async (req, res) => {
           customerId,
           name: customerName,
           address: { street, city, state: state || 'OH', zip, country: 'USA' },
-          contacts: [{ type: 'MobilePhone', value: cleanPhone }]
+          contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
         });
         locationId = newLoc.id;
       }
     }
     
-    // Get appointment date
     const apptDate = getNextBusinessDay(day);
     const window = CONFIG.ARRIVAL_WINDOWS[time_window] || CONFIG.ARRIVAL_WINDOWS.morning;
     
-    // Convert Eastern times to UTC for ServiceTitan
     const startUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.startHour);
     const endUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.endHour);
-    
-    console.log('[BOOK] Appointment date:', apptDate);
-    console.log('[BOOK] Eastern window:', `${window.startHour}:00 - ${window.endHour}:00`);
-    console.log('[BOOK] UTC start:', startUTC);
-    console.log('[BOOK] UTC end:', endUTC);
     
     const isDrain = /drain|sewer|clog|backup|snake/i.test(issue);
     const businessUnitId = isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING;
@@ -263,7 +261,7 @@ module.exports = async (req, res) => {
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = dayNames[apptDate.dayOfWeek];
     
-    console.log('[BOOK] Job created:', job.id);
+    console.log('[BOOK] Job created:', job.id, 'for customer:', customerId);
     
     return res.json({
       result: `Got you all set for ${dayName} ${time_window}. Tech will be there between ${window.startHour} and ${window.endHour}.`,

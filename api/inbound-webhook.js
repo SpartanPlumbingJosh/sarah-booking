@@ -31,22 +31,6 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-// Check if phone matches any contact on the customer
-function phoneMatchesCustomer(customer, searchPhone) {
-  const contacts = customer.contacts || [];
-  for (const contact of contacts) {
-    if (contact.type === 'Phone' || contact.type === 'MobilePhone') {
-      const contactPhone = String(contact.value || '').replace(/\D/g, '');
-      const normalizedContact = contactPhone.length === 11 && contactPhone.startsWith('1') 
-        ? contactPhone.slice(1) : contactPhone;
-      if (normalizedContact === searchPhone) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 async function lookupCustomer(phone) {
   const cleanPhone = String(phone).replace(/\D/g, '');
   const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
@@ -58,8 +42,9 @@ async function lookupCustomer(phone) {
   
   try {
     const token = await getAccessToken();
+    // Use 'phone' parameter per ST API spec
     const response = await fetch(
-      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=10`,
+      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=5`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -72,24 +57,19 @@ async function lookupCustomer(phone) {
     console.log('[INBOUND] ST returned', (data.data || []).length, 'customers for', normalizedPhone);
     
     if (data.data && data.data.length > 0) {
-      // Find customer where phone actually matches
-      for (const customer of data.data) {
-        if (phoneMatchesCustomer(customer, normalizedPhone)) {
-          console.log('[INBOUND] Phone match found:', customer.id, customer.name);
-          const address = customer.address || {};
-          return {
-            customer_id: String(customer.id),
-            customer_name: customer.name || '',
-            customer_first_name: (customer.name || '').split(' ')[0] || '',
-            customer_street: address.street || '',
-            customer_city: address.city || '',
-            customer_state: address.state || '',
-            customer_zip: address.zip || '',
-            is_existing_customer: 'true'
-          };
-        }
-      }
-      console.log('[INBOUND] No phone match in returned customers');
+      const customer = data.data[0];
+      console.log('[INBOUND] Found customer:', customer.id, customer.name);
+      const address = customer.address || {};
+      return {
+        customer_id: String(customer.id),
+        customer_name: customer.name || '',
+        customer_first_name: (customer.name || '').split(' ')[0] || '',
+        customer_street: address.street || '',
+        customer_city: address.city || '',
+        customer_state: address.state || '',
+        customer_zip: address.zip || '',
+        is_existing_customer: 'true'
+      };
     }
     
     return { is_existing_customer: 'false' };
@@ -99,7 +79,6 @@ async function lookupCustomer(phone) {
   }
 }
 
-// Get next N business days
 function getNextBusinessDays(count) {
   const days = [];
   const today = new Date();
@@ -120,7 +99,6 @@ function getNextBusinessDays(count) {
   return days;
 }
 
-// Map hour to window name
 function getWindowName(hour) {
   if (hour >= 8 && hour < 11) return 'morning';
   if (hour >= 11 && hour < 14) return 'midday';
@@ -160,7 +138,6 @@ async function getAvailability() {
     const data = await response.json();
     const availabilities = data.availabilities || [];
     
-    // Group by date
     const slotsByDate = {};
     for (const slot of availabilities) {
       if (!slot.isAvailable) continue;
@@ -177,7 +154,6 @@ async function getAvailability() {
       slotsByDate[dateStr].add(windowName);
     }
     
-    // Build readable string for Sarah
     const available = [];
     for (const day of businessDays) {
       const windows = slotsByDate[day.dateStr];
@@ -197,7 +173,6 @@ async function getAvailability() {
       };
     }
     
-    // Format for Sarah to read naturally
     const slotText = available.slice(0, 3).map(day => {
       return `${day.day}: ${day.windows.join(', ')}`;
     }).join('. ');
@@ -224,7 +199,7 @@ module.exports = async (req, res) => {
   }
   
   try {
-    console.log('[INBOUND] Webhook received:', JSON.stringify(req.body));
+    console.log('[INBOUND] Webhook received');
     
     const { event, call_inbound } = req.body;
     
@@ -235,13 +210,11 @@ module.exports = async (req, res) => {
     const fromNumber = call_inbound.from_number;
     console.log('[INBOUND] Looking up:', fromNumber);
     
-    // Run both lookups in parallel
     const [customerData, availabilityData] = await Promise.all([
       lookupCustomer(fromNumber),
       getAvailability()
     ]);
     
-    // Merge customer + availability data
     const dynamicVars = {
       ...(customerData || { is_existing_customer: 'false' }),
       ...availabilityData
@@ -260,4 +233,3 @@ module.exports = async (req, res) => {
     return res.status(200).json({});
   }
 };
-

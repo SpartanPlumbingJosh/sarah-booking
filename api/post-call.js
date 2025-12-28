@@ -1,33 +1,295 @@
-const bookAppointment = require('./book-appointment');
 const fetch = require('node-fetch');
 
-async function postToSlack(call, bookingResult, wasLead) {
-  const token = process.env.SLACK_BOT_TOKEN;
-  const channel = process.env.SLACK_TRANSCRIPT_CHANNEL;
+const CONFIG = {
+  ST_CLIENT_ID: process.env.ST_CLIENT_ID,
+  ST_CLIENT_SECRET: process.env.ST_CLIENT_SECRET,
+  ST_TENANT_ID: process.env.ST_TENANT_ID,
+  ST_APP_KEY: process.env.ST_APP_KEY,
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
+  SLACK_TRANSCRIPT_CHANNEL: process.env.SLACK_TRANSCRIPT_CHANNEL,
   
-  if (!token || !channel) {
-    console.log('Slack not configured, skipping transcript post');
+  BUSINESS_UNIT_PLUMBING: 40464378,
+  BUSINESS_UNIT_DRAIN: 40472669,
+  JOB_TYPE_SERVICE: 40464992,
+  JOB_TYPE_DRAIN: 79265910,
+  CAMPAIGN_ID: 313,
+  
+  ARRIVAL_WINDOWS: {
+    morning: { startHour: 8, endHour: 11 },
+    midday: { startHour: 11, endHour: 14 },
+    afternoon: { startHour: 14, endHour: 17 }
+  }
+};
+
+let cachedToken = null;
+let tokenExpiry = 0;
+
+async function getAccessToken() {
+  if (cachedToken && Date.now() < tokenExpiry - 60000) return cachedToken;
+  
+  const response = await fetch('https://auth.servicetitan.io/connect/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: CONFIG.ST_CLIENT_ID,
+      client_secret: CONFIG.ST_CLIENT_SECRET
+    })
+  });
+  
+  const data = await response.json();
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in * 1000);
+  return cachedToken;
+}
+
+async function stApi(method, endpoint, body = null) {
+  const token = await getAccessToken();
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'ST-App-Key': CONFIG.ST_APP_KEY,
+      'Content-Type': 'application/json'
+    }
+  };
+  if (body) options.body = JSON.stringify(body);
+  
+  const response = await fetch(`https://api.servicetitan.io${endpoint}`, options);
+  const responseText = await response.text();
+  
+  if (!response.ok) {
+    console.error('[ST API] Error:', response.status, responseText);
+    throw new Error(`ST API error: ${response.status}`);
+  }
+  
+  return JSON.parse(responseText);
+}
+
+async function findCustomerByPhone(phone) {
+  try {
+    const result = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${phone}&pageSize=5`);
+    if (result.data && result.data.length > 0) {
+      return result.data[0];
+    }
+  } catch (error) {
+    console.error('[POST-CALL] Customer lookup failed:', error.message);
+  }
+  return null;
+}
+
+// Parse transcript using Claude
+async function parseTranscript(transcript, callerPhone) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': CONFIG.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: `Extract booking info from this plumbing company call transcript. Return ONLY valid JSON.
+
+Caller phone: ${callerPhone}
+
+Transcript:
+${transcript}
+
+Extract:
+{
+  "should_book": true/false (false if: customer declined service, hung up early, was just asking questions, said they'd call back, or no appointment day/time was confirmed),
+  "first_name": "string or null",
+  "last_name": "string or null", 
+  "phone": "digits only from caller phone above",
+  "street": "street address or null",
+  "city": "string or null",
+  "state": "2 letter abbrev, default OH",
+  "zip": "5 digits or null",
+  "issue": "brief description of plumbing problem",
+  "day": "day of week they chose or null",
+  "time_window": "morning, midday, or afternoon or null",
+  "service_tier": "shield, standard, or economy",
+  "notification_pref": "text or call"
+}
+
+IMPORTANT: should_book is ONLY true if customer confirmed an appointment with a specific day AND time window. Return ONLY JSON.`
+      }]
+    })
+  });
+  
+  const data = await response.json();
+  const text = data.content[0].text.trim();
+  
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('Failed to parse transcript extraction');
+  }
+}
+
+function isDSTinEffect(year, month, day) {
+  if (month < 3 || month > 11) return false;
+  if (month > 3 && month < 11) return true;
+  if (month === 3) {
+    const firstDayOfMarch = new Date(Date.UTC(year, 2, 1)).getUTCDay();
+    const secondSunday = firstDayOfMarch === 0 ? 8 : 15 - firstDayOfMarch;
+    return day >= secondSunday;
+  }
+  if (month === 11) {
+    const firstDayOfNov = new Date(Date.UTC(year, 10, 1)).getUTCDay();
+    const firstSunday = firstDayOfNov === 0 ? 1 : 8 - firstDayOfNov;
+    return day < firstSunday;
+  }
+  return false;
+}
+
+function easternToUTC(year, month, day, hour) {
+  const offset = isDSTinEffect(year, month, day) ? 4 : 5;
+  const utcHour = hour + offset;
+  let finalDay = day, finalMonth = month, finalYear = year, finalHour = utcHour;
+  
+  if (utcHour >= 24) {
+    finalHour = utcHour - 24;
+    const tempDate = new Date(Date.UTC(year, month - 1, day + 1));
+    finalYear = tempDate.getUTCFullYear();
+    finalMonth = tempDate.getUTCMonth() + 1;
+    finalDay = tempDate.getUTCDate();
+  }
+  
+  return `${finalYear}-${String(finalMonth).padStart(2, '0')}-${String(finalDay).padStart(2, '0')}T${String(finalHour).padStart(2, '0')}:00:00Z`;
+}
+
+function getNextBusinessDay(preferredDay) {
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const now = new Date();
+  const easternNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  let targetDate = new Date(easternNow);
+  
+  if (preferredDay) {
+    const targetDayIndex = days.indexOf(preferredDay.toLowerCase());
+    if (targetDayIndex !== -1) {
+      let daysUntil = targetDayIndex - easternNow.getDay();
+      if (daysUntil <= 0) daysUntil += 7;
+      targetDate.setDate(easternNow.getDate() + daysUntil);
+    } else {
+      targetDate.setDate(easternNow.getDate() + 1);
+    }
+  } else {
+    targetDate.setDate(easternNow.getDate() + 1);
+  }
+  
+  while (targetDate.getDay() === 0 || targetDate.getDay() === 6) {
+    targetDate.setDate(targetDate.getDate() + 1);
+  }
+  
+  return {
+    year: targetDate.getFullYear(),
+    month: targetDate.getMonth() + 1,
+    day: targetDate.getDate(),
+    dayOfWeek: targetDate.getDay()
+  };
+}
+
+async function createBooking(parsed) {
+  const cleanPhone = String(parsed.phone).replace(/\D/g, '');
+  const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
+    ? cleanPhone.slice(1) : cleanPhone;
+  
+  const customerName = parsed.last_name 
+    ? `${parsed.first_name} ${parsed.last_name}` 
+    : parsed.first_name;
+  
+  let customerId = null;
+  let locationId = null;
+  
+  const existingCustomer = await findCustomerByPhone(normalizedPhone);
+  if (existingCustomer) {
+    customerId = existingCustomer.id;
+    console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
+    const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
+    if (locations.data?.length > 0) {
+      locationId = locations.data[0].id;
+    }
+  }
+  
+  if (!customerId) {
+    console.log('[POST-CALL] Creating new customer:', customerName);
+    const customerResult = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
+      name: customerName,
+      type: 'Residential',
+      address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+      contacts: [{ type: 'MobilePhone', value: normalizedPhone }],
+      locations: [{
+        name: customerName,
+        address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+        contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
+      }]
+    });
+    customerId = customerResult.id;
+    locationId = customerResult.locations[0].id;
+  }
+  
+  if (!locationId) {
+    const newLoc = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
+      customerId,
+      name: customerName,
+      address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+      contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
+    });
+    locationId = newLoc.id;
+  }
+  
+  const apptDate = getNextBusinessDay(parsed.day);
+  const window = CONFIG.ARRIVAL_WINDOWS[parsed.time_window] || CONFIG.ARRIVAL_WINDOWS.morning;
+  const startUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.startHour);
+  const endUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.endHour);
+  
+  const isDrain = /drain|sewer|clog|backup|snake/i.test(parsed.issue);
+  
+  const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
+    customerId,
+    locationId,
+    businessUnitId: isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING,
+    jobTypeId: isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE,
+    priority: 'Normal',
+    summary: parsed.issue,
+    campaignId: CONFIG.CAMPAIGN_ID,
+    appointments: [{
+      start: startUTC,
+      end: endUTC,
+      arrivalWindowStart: startUTC,
+      arrivalWindowEnd: endUTC
+    }]
+  });
+  
+  console.log('[POST-CALL] Job created:', job.id);
+  
+  return {
+    success: true,
+    job_id: job.id,
+    customer_id: customerId,
+    customer_name: customerName,
+    day: parsed.day,
+    time_window: parsed.time_window
+  };
+}
+
+async function postToSlack(call, parsed, bookingResult) {
+  if (!CONFIG.SLACK_BOT_TOKEN || !CONFIG.SLACK_TRANSCRIPT_CHANNEL) {
+    console.log('[POST-CALL] Slack not configured');
     return;
   }
   
   try {
-    // Get the actual analysis data - Retell nests it under custom_analysis_data
-    const callAnalysis = call?.call_analysis || {};
-    const analysis = callAnalysis?.custom_analysis_data || callAnalysis || {};
-    
-    const transcript = call?.transcript || call?.transcript_object?.map(t => `${t.role}: ${t.content}`).join('\n') || 'No transcript available';
-    
-    // Duration from duration_ms or timestamps
-    let duration = 0;
-    if (call?.duration_ms) {
-      duration = Math.round(call.duration_ms / 1000);
-    } else if (call?.end_timestamp && call?.start_timestamp) {
-      duration = Math.round((call.end_timestamp - call.start_timestamp) / 1000);
-    }
-    
-    const fromNumber = call?.from_number || call?.caller_number || 'Unknown';
-    const disconnectReason = call?.disconnection_reason || 'unknown';
-    
+    const transcript = call?.transcript || 'No transcript';
+    const duration = call?.duration_ms ? Math.round(call.duration_ms / 1000) : 0;
     const mins = Math.floor(duration / 60);
     const secs = duration % 60;
     const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -37,152 +299,95 @@ async function postToSlack(call, bookingResult, wasLead) {
     if (bookingResult?.success) {
       headerEmoji = '✅';
       headerText = 'Booked';
-      statusText = `Booked | Job #${bookingResult.job_id}`;
-    } else if (!wasLead) {
+      statusText = `Job #${bookingResult.job_id} | ${bookingResult.day} ${bookingResult.time_window}`;
+    } else if (parsed?.should_book === false) {
       headerEmoji = '🟡';
-      headerText = 'Not a Lead';
-      statusText = `Not a Lead | ${disconnectReason}`;
+      headerText = 'No Booking';
+      statusText = 'Customer did not schedule';
     } else {
       headerEmoji = '❌';
-      headerText = 'Unbooked';
-      statusText = `Unbooked | ${disconnectReason}`;
+      headerText = 'Failed';
+      statusText = 'Missing required info';
     }
     
-    const customerName = [analysis.first_name, analysis.last_name].filter(Boolean).join(' ') || 'Unknown';
-    const address = [analysis.street, analysis.city, analysis.state, analysis.zip].filter(Boolean).join(', ') || 'Not provided';
-    const issue = analysis.issue || callAnalysis.call_summary || 'No summary provided';
+    const customerName = [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const address = [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
+    const fromNumber = call?.from_number || 'Unknown';
     
-    const messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone Number:* ${fromNumber}\n*Summary of Call:* ${issue}\n\n⏱️ ${durationStr} | ${statusText}\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
+    const messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${fromNumber}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
 
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': `Bearer ${CONFIG.SLACK_BOT_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        channel,
+        channel: CONFIG.SLACK_TRANSCRIPT_CHANNEL,
         text: messageText,
         mrkdwn: true
       })
     });
     
-    console.log('Transcript posted to Slack');
+    console.log('[POST-CALL] Posted to Slack');
   } catch (err) {
-    console.error('Slack post error:', err.message);
+    console.error('[POST-CALL] Slack error:', err.message);
   }
-}
-
-function isLead(analysis, call) {
-  const summary = (analysis?.call_summary || analysis?.issue || '').toLowerCase();
-  const transcript = call?.transcript?.toLowerCase() || '';
-  
-  // Explicit non-lead indicators
-  const nonLeadPhrases = ['wrong number', 'misdial', 'pizza', 'not the right number', 'sorry wrong'];
-  if (nonLeadPhrases.some(phrase => summary.includes(phrase) || transcript.includes(phrase))) {
-    return false;
-  }
-  
-  // If booking was confirmed, definitely a lead
-  if (analysis?.booking_confirmed === true || analysis?.booking_confirmed === 'true') {
-    return true;
-  }
-  
-  // If they provided address info, definitely a lead
-  if (analysis?.street || analysis?.city || analysis?.zip) return true;
-  
-  // If they discussed scheduling, definitely a lead  
-  if (analysis?.appointment_day || analysis?.time_window) return true;
-  
-  // If there's a substantive issue, it's a lead
-  if (analysis?.issue && analysis.issue.length > 15) return true;
-  
-  // Very short calls are likely not leads
-  const duration = call?.duration_ms || 0;
-  if (duration < 30000) return false;
-  
-  // Default: calls over 1 min are probably leads
-  return duration > 60000;
 }
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   
   try {
-    const payload = req.body;
+    const { event, call } = req.body;
     
-    console.log('=== POST-CALL WEBHOOK ===');
-    console.log('Full payload:', JSON.stringify(payload, null, 2));
-    
-    // Retell sends { event: 'call_ended', call: {...} } OR { event: 'call_analyzed', call: {...} }
-    const event = payload?.event || 'call_ended';
-    const call = payload?.call || payload;
+    console.log('[POST-CALL] Event:', event);
     
     if (event !== 'call_ended' && event !== 'call_analyzed') {
-      return res.json({ status: 'ignored', reason: `event is ${event}` });
+      return res.status(200).json({ status: 'ignored', reason: `event: ${event}` });
     }
     
-    // IMPORTANT: Retell nests the data under call_analysis.custom_analysis_data
-    const callAnalysis = call?.call_analysis || {};
-    const analysis = callAnalysis?.custom_analysis_data || callAnalysis || {};
+    const transcript = call?.transcript;
+    const callerPhone = call?.from_number;
     
-    console.log('Call analysis:', JSON.stringify(callAnalysis, null, 2));
-    console.log('Extracted analysis:', JSON.stringify(analysis, null, 2));
+    if (!transcript) {
+      console.log('[POST-CALL] No transcript');
+      return res.status(200).json({ status: 'skipped', reason: 'no transcript' });
+    }
+    
+    console.log('[POST-CALL] Processing call from:', callerPhone);
+    console.log('[POST-CALL] Transcript:', transcript.slice(0, 500));
+    
+    // Parse transcript with Claude
+    const parsed = await parseTranscript(transcript, callerPhone);
+    console.log('[POST-CALL] Parsed:', JSON.stringify(parsed, null, 2));
     
     let bookingResult = null;
     
-    // Check if booking confirmed (handle both boolean and string)
-    const bookingConfirmed = analysis?.booking_confirmed === true || analysis?.booking_confirmed === 'true';
-    
-    console.log('Booking confirmed?', bookingConfirmed);
-    console.log('Has first_name?', !!analysis?.first_name);
-    console.log('Has street?', !!analysis?.street);
-    
-    if (bookingConfirmed && analysis?.first_name && analysis?.street) {
-      console.log('=== CREATING JOB ===');
+    if (parsed.should_book) {
+      const required = ['first_name', 'phone', 'street', 'city', 'zip', 'issue', 'day', 'time_window'];
+      const missing = required.filter(f => !parsed[f]);
       
-      // Get phone from analysis or call
-      const phone = analysis.phone || call?.from_number?.replace(/\\D/g, '');
-      
-      const bookingData = {
-        first_name: analysis.first_name,
-        last_name: analysis.last_name || '',
-        phone: phone,
-        street: analysis.street,
-        city: analysis.city || '',
-        state: analysis.state || 'OH',
-        zip: analysis.zip || '',
-        issue: analysis.issue || callAnalysis.call_summary || 'Service call',
-        day: analysis.appointment_day || '',
-        time_window: analysis.time_window || 'morning'
-      };
-      
-      console.log('Booking data:', JSON.stringify(bookingData, null, 2));
-      
-      const mockReq = { method: 'POST', body: bookingData };
-      const mockRes = { 
-        json: (data) => { bookingResult = data; return mockRes; }, 
-        status: () => mockRes 
-      };
-      
-      await bookAppointment(mockReq, mockRes);
-      console.log('=== BOOKING RESULT ===');
-      console.log(JSON.stringify(bookingResult, null, 2));
+      if (missing.length > 0) {
+        console.log('[POST-CALL] Missing required:', missing);
+      } else {
+        bookingResult = await createBooking(parsed);
+      }
     } else {
-      console.log('Skipping job creation - missing required data');
+      console.log('[POST-CALL] should_book is false - no booking');
     }
     
-    const wasLead = isLead(analysis, call);
-    await postToSlack(call, bookingResult, wasLead);
+    // Post to Slack
+    await postToSlack(call, parsed, bookingResult);
     
-    return res.json({ 
-      status: bookingResult?.success ? 'booked' : (wasLead ? 'unbooked' : 'not_lead'),
-      booking_confirmed: bookingConfirmed,
-      ...bookingResult 
+    return res.status(200).json({
+      status: bookingResult?.success ? 'booked' : 'not_booked',
+      parsed,
+      booking: bookingResult
     });
     
   } catch (error) {
-    console.error('Post-call error:', error);
+    console.error('[POST-CALL] Error:', error.message);
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };

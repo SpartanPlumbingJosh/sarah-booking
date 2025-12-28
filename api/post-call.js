@@ -384,11 +384,23 @@ async function postToSlack(call, parsed, bookingResult) {
       statusText = 'Booking failed - check logs';
     }
     
+    // Format phone as 555-555-1234
+    const formatPhone = (p) => {
+      const digits = String(p).replace(/\D/g, '');
+      if (digits.length === 10) return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
+      if (digits.length === 11 && digits.startsWith('1')) return `${digits.slice(1,4)}-${digits.slice(4,7)}-${digits.slice(7)}`;
+      return p;
+    };
+    
     const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = bookingResult?.address || [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
     const callerID = call?.from_number || 'Unknown';
     const spokenPhone = parsed?.phone || null;
-    const phoneDisplay = spokenPhone ? (spokenPhone !== callerID.replace(/\D/g, '') ? `${spokenPhone} (caller ID: ${callerID})` : spokenPhone) : callerID;
+    const callerDigits = callerID.replace(/\D/g, '');
+    const spokenDigits = spokenPhone ? spokenPhone.replace(/\D/g, '') : null;
+    const phoneDisplay = spokenDigits 
+      ? (spokenDigits !== callerDigits ? `${formatPhone(spokenDigits)} (caller ID: ${formatPhone(callerDigits)})` : formatPhone(spokenDigits)) 
+      : formatPhone(callerID);
     const recordingUrl = call?.recording_url || null;
     
     let messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${phoneDisplay}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}`;

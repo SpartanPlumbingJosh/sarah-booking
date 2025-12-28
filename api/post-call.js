@@ -22,54 +22,40 @@ async function postToSlack(call, bookingResult, wasLead) {
     const secs = duration % 60;
     const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
     
-    // Determine status and color
-    let headerEmoji, headerText, statusLine;
+    // Determine status and emoji
+    let headerEmoji, headerText, statusText;
     
     if (bookingResult?.success) {
-      // GREEN - Booked
       headerEmoji = '✅';
       headerText = 'Booked';
-      statusLine = `${durationStr} | Booked | Job #${bookingResult.job_id}`;
+      statusText = `Booked | Job #${bookingResult.job_id}`;
     } else if (!wasLead) {
-      // YELLOW - Not a lead (non-booking call like existing customer question, wrong number, etc)
       headerEmoji = '🟡';
       headerText = 'Not a Lead';
-      statusLine = `${durationStr} | Not a Lead | ${disconnectReason}`;
+      statusText = `Not a Lead | ${disconnectReason}`;
     } else {
-      // RED - Unbooked (was a lead but didn't book)
       headerEmoji = '❌';
       headerText = 'Unbooked';
-      statusLine = `${durationStr} | Unbooked | ${disconnectReason}`;
+      statusText = `Unbooked | ${disconnectReason}`;
     }
     
     const customerName = [analysis.first_name, analysis.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = [analysis.street, analysis.city, analysis.state, analysis.zip].filter(Boolean).join(', ') || 'Not provided';
-    const issue = analysis.issue || analysis.call_summary || 'No issue recorded';
+    const issue = analysis.issue || analysis.call_summary || 'No summary provided';
     
-    const blocks = [
-      {
-        type: 'section',
-        text: { 
-          type: 'mrkdwn', 
-          text: `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone Number:* ${fromNumber}\n*Summary of Call:* ${issue}` 
-        }
-      },
-      {
-        type: 'context',
-        elements: [
-          { type: 'mrkdwn', text: `⏱️ ${statusLine}` }
-        ]
-      },
-      { type: 'divider' },
-      {
-        type: 'section',
-        text: { 
-          type: 'mrkdwn', 
-          text: `*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\`` 
-        }
-      }
-    ];
-    
+    // Match the exact format from the existing posts
+    const messageText = `${headerEmoji} *${headerText}*
+
+*Name:* ${customerName}
+*Address:* ${address}
+*Phone Number:* ${fromNumber}
+*Summary of Call:* ${issue}
+
+⏱️ ${durationStr} | ${statusText}
+
+*Transcript:*
+\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
+
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
@@ -78,8 +64,8 @@ async function postToSlack(call, bookingResult, wasLead) {
       },
       body: JSON.stringify({
         channel,
-        blocks,
-        text: `${headerEmoji} ${headerText} - ${customerName}`
+        text: messageText,
+        mrkdwn: true
       })
     });
     
@@ -89,23 +75,18 @@ async function postToSlack(call, bookingResult, wasLead) {
   }
 }
 
-// Determine if call was a lead based on analysis
 function isLead(analysis, call) {
-  // If they provided address info or discussed scheduling, it's a lead
   if (analysis?.street || analysis?.city || analysis?.zip) return true;
   if (analysis?.appointment_day || analysis?.time_window) return true;
   if (analysis?.issue && analysis.issue.length > 20) return true;
   
-  // Check transcript for lead indicators
   const transcript = call?.transcript?.toLowerCase() || '';
   const leadPhrases = ['schedule', 'appointment', 'come out', 'available', 'book', 'service', 'fix', 'repair', 'leak', 'clog', 'drain', 'water heater', 'plumb'];
   if (leadPhrases.some(phrase => transcript.includes(phrase))) return true;
   
-  // Short calls with no issue are likely not leads
   const duration = call?.call_duration_ms || 0;
   if (duration < 30000 && !analysis?.issue) return false;
   
-  // Default to assuming it's a lead
   return true;
 }
 
@@ -122,7 +103,6 @@ module.exports = async (req, res) => {
     const analysis = call?.call_analysis || call?.post_call_analysis_data;
     let bookingResult = null;
     
-    // Try to book if confirmed
     if (analysis?.booking_confirmed) {
       const mockReq = {
         method: 'POST',
@@ -148,10 +128,7 @@ module.exports = async (req, res) => {
       await bookAppointment(mockReq, mockRes);
     }
     
-    // Determine if this was a lead
     const wasLead = isLead(analysis, call);
-    
-    // Post transcript to Slack
     await postToSlack(call, bookingResult, wasLead);
     
     return res.json({ 

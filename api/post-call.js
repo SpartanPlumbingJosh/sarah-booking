@@ -105,16 +105,18 @@ ${transcript}
   "should_book": true if agent said "you're all set" or confirmed an appointment. false if customer declined or hung up early,
   "first_name": "string or null",
   "last_name": "string or null", 
-  "phone": "${cleanPhone}",
-  "street": "street address or null",
-  "city": "string or null",
-  "state": "OH",
-  "zip": "5 digits or null",
+  "phone": "the phone number they SAID on the call (digits only), or ${cleanPhone} if they didn't give one",
+  "street": "street address THEY SAID on the call or null",
+  "city": "city THEY SAID on the call or null",
+  "state": "state or OH",
+  "zip": "zip code THEY SAID on the call or null",
   "issue": "plumbing problem description",
   "day": "day of week or null",
-  "time_window": "morning/midday/afternoon or null"
+  "time_window": "morning/midday/afternoon or null",
+  "is_new_customer": true if they said they've never used the service before
 }
 
+IMPORTANT: Extract the address the customer SAID on the call, not any address the agent might have mentioned from their records.
 Return ONLY JSON.`
       }]
     })
@@ -195,52 +197,63 @@ function getNextBusinessDay(preferredDay) {
   };
 }
 
-// ALWAYS BOOK IF should_book IS TRUE - fill in gaps with defaults or ST data
+// ALWAYS use the address from the call - NEVER override with ST data
 async function createBooking(parsed, callerPhone) {
   const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
   const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
     ? cleanPhone.slice(1) : cleanPhone;
   
-  let customerId = null;
-  let locationId = null;
-  let customerName = null;
+  // ALWAYS use what they said on the call
   let street = parsed.street;
   let city = parsed.city;
   let state = parsed.state || 'OH';
   let zip = parsed.zip;
   
-  // Check for existing customer - use their data to fill gaps
+  // Build customer name from what they said
+  let customerName = parsed.last_name 
+    ? `${parsed.first_name || 'Customer'} ${parsed.last_name}` 
+    : (parsed.first_name || 'Customer');
+  
+  let customerId = null;
+  let locationId = null;
+  
+  // Check for existing customer by phone
   const existingCustomer = await findCustomerByPhone(normalizedPhone);
   if (existingCustomer) {
     customerId = existingCustomer.id;
-    customerName = existingCustomer.name;
-    console.log('[POST-CALL] Found existing customer:', customerId, customerName);
+    console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
     
-    // Fill in from ST if we're missing data
-    const addr = existingCustomer.address || {};
-    if (!street) street = addr.street;
-    if (!city) city = addr.city;
-    if (!zip) zip = addr.zip;
-    if (addr.state) state = addr.state;
+    // Use existing customer name if we didn't get one
+    if (!parsed.first_name) {
+      customerName = existingCustomer.name;
+    }
     
-    const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
-    if (locations.data?.length > 0) {
-      locationId = locations.data[0].id;
+    // ONLY use ST address as fallback if we got NOTHING from the call
+    const stAddr = existingCustomer.address || {};
+    if (!street && !city && !zip) {
+      console.log('[POST-CALL] No address from call, using ST address');
+      street = stAddr.street;
+      city = stAddr.city;
+      zip = stAddr.zip;
+      if (stAddr.state) state = stAddr.state;
+      
+      // Use existing location
+      const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
+      if (locations.data?.length > 0) {
+        locationId = locations.data[0].id;
+      }
+    } else {
+      // They gave us an address - create NEW location for this address
+      console.log('[POST-CALL] Using address from call, creating new location');
     }
   }
   
-  // Build customer name from parsed if not existing
-  if (!customerName) {
-    customerName = parsed.last_name 
-      ? `${parsed.first_name || 'Customer'} ${parsed.last_name}` 
-      : (parsed.first_name || 'Customer');
-  }
-  
-  // DEFAULTS - book it anyway, can follow up for details
+  // DEFAULTS if still missing
   if (!street) street = 'NEEDS ADDRESS';
   if (!city) city = 'NEEDS CITY';
-  if (!zip) zip = '45402'; // Dayton default
+  if (!zip) zip = '45402';
   
+  // Create new customer if needed
   if (!customerId) {
     console.log('[POST-CALL] Creating new customer:', customerName);
     const customerResult = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
@@ -258,7 +271,9 @@ async function createBooking(parsed, callerPhone) {
     locationId = customerResult.locations[0].id;
   }
   
+  // Create new location if we have customer but no location (new address for existing customer)
   if (!locationId) {
+    console.log('[POST-CALL] Creating new location for existing customer');
     const newLoc = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
       customerId,
       name: customerName,
@@ -268,7 +283,6 @@ async function createBooking(parsed, callerPhone) {
     locationId = newLoc.id;
   }
   
-  // Default to next business day morning if no time specified
   const apptDate = getNextBusinessDay(parsed.day);
   const timeWindow = parsed.time_window || 'morning';
   const window = CONFIG.ARRIVAL_WINDOWS[timeWindow] || CONFIG.ARRIVAL_WINDOWS.morning;
@@ -298,18 +312,19 @@ async function createBooking(parsed, callerPhone) {
   
   console.log('[POST-CALL] Job created:', job.id);
   
-  // Flag if we're missing data
   const missingData = [];
-  if (parsed.street === null) missingData.push('address');
-  if (parsed.city === null) missingData.push('city');
-  if (parsed.zip === null) missingData.push('zip');
-  if (parsed.first_name === null) missingData.push('name');
+  if (!parsed.street) missingData.push('address');
+  if (!parsed.city) missingData.push('city');
+  if (!parsed.zip) missingData.push('zip');
+  if (!parsed.first_name) missingData.push('name');
   
   return {
     success: true,
     job_id: job.id,
     customer_id: customerId,
+    location_id: locationId,
     customer_name: customerName,
+    address: `${street}, ${city}, ${state} ${zip}`,
     day: dayNames[apptDate.dayOfWeek],
     time_window: timeWindow,
     missing_data: missingData.length > 0 ? missingData : null
@@ -347,7 +362,7 @@ async function postToSlack(call, parsed, bookingResult) {
     }
     
     const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
-    const address = [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
+    const address = bookingResult?.address || [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
     const fromNumber = call?.from_number || 'Unknown';
     
     const messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${fromNumber}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
@@ -393,13 +408,11 @@ module.exports = async (req, res) => {
     
     console.log('[POST-CALL] Processing call from:', callerPhone);
     
-    // Parse transcript with Claude
     const parsed = await parseTranscript(transcript, callerPhone);
     console.log('[POST-CALL] Parsed:', JSON.stringify(parsed, null, 2));
     
     let bookingResult = null;
     
-    // IF SHOULD_BOOK IS TRUE, WE BOOK IT. PERIOD.
     if (parsed.should_book) {
       console.log('[POST-CALL] should_book=true, creating booking...');
       bookingResult = await createBooking(parsed, callerPhone);

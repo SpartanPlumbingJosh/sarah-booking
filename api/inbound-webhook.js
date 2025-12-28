@@ -59,7 +59,7 @@ async function lookupCustomer(phone) {
   try {
     const token = await getAccessToken();
     const response = await fetch(
-      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${normalizedPhone}&pageSize=10`,
+      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=10`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -260,3 +260,4 @@ module.exports = async (req, res) => {
     return res.status(200).json({});
   }
 };
+

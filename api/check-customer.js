@@ -31,27 +31,11 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-// Check if phone matches any contact on the customer
-function phoneMatchesCustomer(customer, searchPhone) {
-  const contacts = customer.contacts || [];
-  for (const contact of contacts) {
-    if (contact.type === 'Phone' || contact.type === 'MobilePhone') {
-      const contactPhone = String(contact.value || '').replace(/\D/g, '');
-      const normalizedContact = contactPhone.length === 11 && contactPhone.startsWith('1') 
-        ? contactPhone.slice(1) : contactPhone;
-      if (normalizedContact === searchPhone) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 async function lookupCustomer(cleanPhone) {
   const token = await getAccessToken();
   const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${cleanPhone}&pageSize=10`;
   
-  console.log('[CHECK-CUSTOMER] Calling ST API:', url);
+  console.log('[CHECK-CUSTOMER] URL:', url);
   
   const response = await fetch(url, {
     headers: {
@@ -61,30 +45,9 @@ async function lookupCustomer(cleanPhone) {
   });
   
   const data = await response.json();
-  console.log('[CHECK-CUSTOMER] ST API returned', (data.data || []).length, 'customers');
   
-  if (data.data && data.data.length > 0) {
-    // Find customer where phone actually matches
-    for (const customer of data.data) {
-      console.log('[CHECK-CUSTOMER] Checking customer:', customer.id, customer.name);
-      if (phoneMatchesCustomer(customer, cleanPhone)) {
-        console.log('[CHECK-CUSTOMER] Phone match found for customer:', customer.id);
-        const address = customer.address || {};
-        return {
-          found: true,
-          customer_id: customer.id,
-          customer_name: customer.name,
-          street: address.street || '',
-          city: address.city || '',
-          state: address.state || '',
-          zip: address.zip || ''
-        };
-      }
-    }
-    console.log('[CHECK-CUSTOMER] No phone match in returned customers');
-  }
-  
-  return { found: false, customer_id: null };
+  // Return raw for debugging
+  return { raw: data, count: (data.data || []).length };
 }
 
 module.exports = async (req, res) => {
@@ -93,68 +56,51 @@ module.exports = async (req, res) => {
   }
   
   try {
-    console.log('[CHECK-CUSTOMER] Request body:', JSON.stringify(req.body));
-    
     let phone = req.body?.phone;
-    
-    if (phone && phone.includes('{{')) {
-      phone = null;
-    }
-    
-    if (!phone && req.body?.call?.from_number) {
-      phone = req.body.call.from_number;
-    }
-    if (!phone && req.body?.from_number) {
-      phone = req.body.from_number;
-    }
+    const debug = req.body?.debug === true;
     
     if (!phone) {
-      return res.json({ 
-        result: "What's a good callback number for you?",
-        need_phone: true
-      });
+      return res.json({ result: "What's a good callback number for you?", need_phone: true });
     }
     
     const cleanPhone = String(phone).replace(/\D/g, '');
     const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
       ? cleanPhone.slice(1) : cleanPhone;
     
-    console.log('[CHECK-CUSTOMER] Normalized phone:', normalizedPhone);
-    
     if (normalizedPhone.length !== 10) {
-      return res.json({ 
-        result: "Can you give me the full number with area code?",
-        need_phone: true
-      });
+      return res.json({ result: "Can you give me the full number with area code?", need_phone: true });
     }
     
     const lookup = await lookupCustomer(normalizedPhone);
     
-    if (lookup.found) {
-      return res.json({
-        result: "Got it.",
-        found: true,
-        customer_id: lookup.customer_id,
-        customer_name: lookup.customer_name,
-        street: lookup.street,
-        city: lookup.city,
-        state: lookup.state,
-        zip: lookup.zip
+    if (debug) {
+      return res.json({ 
+        searched_phone: normalizedPhone,
+        results_count: lookup.count,
+        raw_response: lookup.raw
       });
     }
     
-    return res.json({ 
-      result: "Got it.",
-      found: false,
-      customer_id: null 
-    });
+    // Normal flow
+    if (lookup.raw.data && lookup.raw.data.length > 0) {
+      const customer = lookup.raw.data[0];
+      const address = customer.address || {};
+      return res.json({
+        result: "Got it.",
+        found: true,
+        customer_id: customer.id,
+        customer_name: customer.name,
+        street: address.street || '',
+        city: address.city || '',
+        state: address.state || '',
+        zip: address.zip || ''
+      });
+    }
+    
+    return res.json({ result: "Got it.", found: false, customer_id: null });
     
   } catch (error) {
     console.error('[CHECK-CUSTOMER] Error:', error.message);
-    return res.json({ 
-      result: "Got it.",
-      error: error.message
-    });
+    return res.json({ result: "Got it.", error: error.message });
   }
 };
-

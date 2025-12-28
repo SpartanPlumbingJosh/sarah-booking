@@ -31,20 +31,35 @@ async function getAccessToken() {
   return cachedToken;
 }
 
+// Check if phone matches any contact on the customer
+function phoneMatchesCustomer(customer, searchPhone) {
+  const contacts = customer.contacts || [];
+  for (const contact of contacts) {
+    if (contact.type === 'Phone' || contact.type === 'MobilePhone') {
+      const contactPhone = String(contact.value || '').replace(/\D/g, '');
+      const normalizedContact = contactPhone.length === 11 && contactPhone.startsWith('1') 
+        ? contactPhone.slice(1) : contactPhone;
+      if (normalizedContact === searchPhone) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function lookupCustomer(phone) {
   const cleanPhone = String(phone).replace(/\D/g, '');
   const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
-    ? cleanPhone.slice(1) 
-    : cleanPhone;
+    ? cleanPhone.slice(1) : cleanPhone;
   
   if (normalizedPhone.length !== 10) {
-    return null;
+    return { is_existing_customer: 'false' };
   }
   
   try {
     const token = await getAccessToken();
     const response = await fetch(
-      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${normalizedPhone}&pageSize=5`,
+      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${normalizedPhone}&pageSize=10`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -54,20 +69,27 @@ async function lookupCustomer(phone) {
     );
     
     const data = await response.json();
+    console.log('[INBOUND] ST returned', (data.data || []).length, 'customers for', normalizedPhone);
     
     if (data.data && data.data.length > 0) {
-      const customer = data.data[0];
-      const address = customer.address || {};
-      return {
-        customer_id: String(customer.id),
-        customer_name: customer.name || '',
-        customer_first_name: (customer.name || '').split(' ')[0] || '',
-        customer_street: address.street || '',
-        customer_city: address.city || '',
-        customer_state: address.state || '',
-        customer_zip: address.zip || '',
-        is_existing_customer: 'true'
-      };
+      // Find customer where phone actually matches
+      for (const customer of data.data) {
+        if (phoneMatchesCustomer(customer, normalizedPhone)) {
+          console.log('[INBOUND] Phone match found:', customer.id, customer.name);
+          const address = customer.address || {};
+          return {
+            customer_id: String(customer.id),
+            customer_name: customer.name || '',
+            customer_first_name: (customer.name || '').split(' ')[0] || '',
+            customer_street: address.street || '',
+            customer_city: address.city || '',
+            customer_state: address.state || '',
+            customer_zip: address.zip || '',
+            is_existing_customer: 'true'
+          };
+        }
+      }
+      console.log('[INBOUND] No phone match in returned customers');
     }
     
     return { is_existing_customer: 'false' };

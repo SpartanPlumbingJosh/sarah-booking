@@ -197,6 +197,24 @@ function getNextBusinessDay(preferredDay) {
   };
 }
 
+
+// Check if we already booked this call (same customer, same day, in last 5 min)
+async function alreadyBooked(customerId, appointmentDate) {
+  try {
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const jobs = await stApi('GET', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs?customerId=${customerId}&createdOnOrAfter=${fiveMinAgo}&pageSize=5`);
+    
+    if (jobs.data && jobs.data.length > 0) {
+      console.log('[POST-CALL] Found', jobs.data.length, 'recent jobs for customer', customerId);
+      return true; // Already booked in last 5 min
+    }
+    return false;
+  } catch (error) {
+    console.error('[POST-CALL] Dedupe check failed:', error.message);
+    return false; // On error, proceed with booking
+  }
+}
+
 // ALWAYS use the address from the call - NEVER override with ST data
 async function createBooking(parsed, callerPhone) {
   const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
@@ -416,7 +434,18 @@ module.exports = async (req, res) => {
     let bookingResult = null;
     
     if (parsed.should_book) {
-      console.log('[POST-CALL] should_book=true, creating booking...');
+      console.log('[POST-CALL] should_book=true, checking for duplicates...');
+      
+      // Check if already booked (prevents double booking from webhook retries)
+      const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
+      const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') ? cleanPhone.slice(1) : cleanPhone;
+      const existingCustomer = await findCustomerByPhone(normalizedPhone);
+      
+      if (existingCustomer && await alreadyBooked(existingCustomer.id)) {
+        console.log('[POST-CALL] DUPLICATE DETECTED - skipping booking');
+        return res.status(200).json({ status: 'duplicate', reason: 'already booked in last 5 min' });
+      }
+      
       bookingResult = await createBooking(parsed, callerPhone);
     } else {
       console.log('[POST-CALL] should_book=false, no booking');
@@ -435,3 +464,4 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+

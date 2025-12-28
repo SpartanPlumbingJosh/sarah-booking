@@ -31,9 +31,25 @@ async function getAccessToken() {
   return cachedToken;
 }
 
+// Check if phone matches any contact on the customer
+function phoneMatchesCustomer(customer, searchPhone) {
+  const contacts = customer.contacts || [];
+  for (const contact of contacts) {
+    if (contact.type === 'Phone' || contact.type === 'MobilePhone') {
+      const contactPhone = String(contact.value || '').replace(/\D/g, '');
+      const normalizedContact = contactPhone.length === 11 && contactPhone.startsWith('1') 
+        ? contactPhone.slice(1) : contactPhone;
+      if (normalizedContact === searchPhone) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function lookupCustomer(cleanPhone) {
   const token = await getAccessToken();
-  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${cleanPhone}&pageSize=5`;
+  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phoneNumber=${cleanPhone}&pageSize=10`;
   
   console.log('[CHECK-CUSTOMER] Calling ST API:', url);
   
@@ -45,20 +61,27 @@ async function lookupCustomer(cleanPhone) {
   });
   
   const data = await response.json();
-  console.log('[CHECK-CUSTOMER] ST API response:', JSON.stringify(data));
+  console.log('[CHECK-CUSTOMER] ST API returned', (data.data || []).length, 'customers');
   
   if (data.data && data.data.length > 0) {
-    const customer = data.data[0];
-    const address = customer.address || {};
-    return {
-      found: true,
-      customer_id: customer.id,
-      customer_name: customer.name,
-      street: address.street || '',
-      city: address.city || '',
-      state: address.state || '',
-      zip: address.zip || ''
-    };
+    // Find customer where phone actually matches
+    for (const customer of data.data) {
+      console.log('[CHECK-CUSTOMER] Checking customer:', customer.id, customer.name);
+      if (phoneMatchesCustomer(customer, cleanPhone)) {
+        console.log('[CHECK-CUSTOMER] Phone match found for customer:', customer.id);
+        const address = customer.address || {};
+        return {
+          found: true,
+          customer_id: customer.id,
+          customer_name: customer.name,
+          street: address.street || '',
+          city: address.city || '',
+          state: address.state || '',
+          zip: address.zip || ''
+        };
+      }
+    }
+    console.log('[CHECK-CUSTOMER] No phone match in returned customers');
   }
   
   return { found: false, customer_id: null };
@@ -75,7 +98,6 @@ module.exports = async (req, res) => {
     let phone = req.body?.phone;
     
     if (phone && phone.includes('{{')) {
-      console.log('[CHECK-CUSTOMER] Template variable not substituted:', phone);
       phone = null;
     }
     
@@ -95,8 +117,7 @@ module.exports = async (req, res) => {
     
     const cleanPhone = String(phone).replace(/\D/g, '');
     const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
-      ? cleanPhone.slice(1) 
-      : cleanPhone;
+      ? cleanPhone.slice(1) : cleanPhone;
     
     console.log('[CHECK-CUSTOMER] Normalized phone:', normalizedPhone);
     

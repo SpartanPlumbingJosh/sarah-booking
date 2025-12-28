@@ -61,7 +61,7 @@ async function stApi(method, endpoint, body = null) {
   
   if (!response.ok) {
     console.error('[ST API] Error:', response.status, responseText);
-    throw new Error(`ST API error: ${response.status}`);
+    throw new Error(`ST API error: ${response.status} - ${responseText.substring(0, 500)}`);
   }
   
   return JSON.parse(responseText);

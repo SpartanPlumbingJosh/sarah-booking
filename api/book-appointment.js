@@ -16,7 +16,11 @@ const CONFIG = {
     morning: { start: '08:00', end: '11:00' },
     midday: { start: '11:00', end: '14:00' },
     afternoon: { start: '14:00', end: '17:00' }
-  }
+  },
+  
+  // Eastern Time offset (EST = -05:00, EDT = -04:00)
+  // Using EST for now - could make this dynamic for DST
+  TIMEZONE_OFFSET: '-05:00'
 };
 
 let cachedToken = null;
@@ -54,7 +58,10 @@ async function stApi(method, endpoint, body = null) {
   if (body) options.body = JSON.stringify(body);
   
   const response = await fetch(`https://api.servicetitan.io${endpoint}`, options);
-  if (!response.ok) throw new Error(`ST API error: ${response.status}`);
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`ST API error: ${response.status} - ${errText}`);
+  }
   return response.json();
 }
 
@@ -86,7 +93,6 @@ module.exports = async (req, res) => {
     
     const missing = [];
     if (!first_name) missing.push('first name');
-    if (!last_name) missing.push('last name');
     if (!phone) missing.push('phone');
     if (!street) missing.push('street address');
     if (!city) missing.push('city');
@@ -99,7 +105,7 @@ module.exports = async (req, res) => {
     }
     
     const cleanPhone = String(phone).replace(/\D/g, '');
-    const customerName = `${first_name} ${last_name}`;
+    const customerName = last_name ? `${first_name} ${last_name}` : first_name;
     
     let customerId = customer_id;
     let locationId = null;
@@ -141,22 +147,29 @@ module.exports = async (req, res) => {
     const businessUnitId = isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING;
     const jobTypeId = isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE;
     
+    // IMPORTANT: Include timezone offset so ServiceTitan interprets times correctly
+    const tzOffset = CONFIG.TIMEZONE_OFFSET;
+    
     const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
       customerId, locationId, businessUnitId, jobTypeId,
       priority: 'Normal', summary: issue, campaignId: CONFIG.CAMPAIGN_ID,
       appointments: [{
-        start: `${dateStr}T${window.start}:00`,
-        end: `${dateStr}T${window.end}:00`,
-        arrivalWindowStart: `${dateStr}T${window.start}:00`,
-        arrivalWindowEnd: `${dateStr}T${window.end}:00`
+        start: `${dateStr}T${window.start}:00${tzOffset}`,
+        end: `${dateStr}T${window.end}:00${tzOffset}`,
+        arrivalWindowStart: `${dateStr}T${window.start}:00${tzOffset}`,
+        arrivalWindowEnd: `${dateStr}T${window.end}:00${tzOffset}`
       }]
     });
     
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = dayNames[appointmentDate.getDay()];
     
+    // Format times for speech (08:00 -> 8, 11:00 -> 11)
+    const startHour = parseInt(window.start.split(':')[0]);
+    const endHour = parseInt(window.end.split(':')[0]);
+    
     return res.json({
-      result: `Got you all set for ${dayName} ${time_window}. Tech will be there between ${window.start.replace(':00', '')} and ${window.end.replace(':00', '')}.`,
+      result: `Got you all set for ${dayName} ${time_window}. Tech will be there between ${startHour} and ${endHour}.`,
       success: true, job_id: job.id, job_number: job.jobNumber,
       appointment_id: job.firstAppointmentId, customer_id: customerId, location_id: locationId
     });

@@ -391,11 +391,13 @@ module.exports = async (req, res) => {
   
   try {
     const { event, call } = req.body;
+    const callId = call?.call_id;
     
-    console.log('[POST-CALL] Event:', event);
+    console.log('[POST-CALL] Event:', event, 'Call ID:', callId);
     
-    if (event !== 'call_ended' && event !== 'call_analyzed') {
-      return res.status(200).json({ status: 'ignored', reason: `event: ${event}` });
+    // ONLY process call_ended - ignore call_analyzed to prevent double booking
+    if (event !== 'call_ended') {
+      return res.status(200).json({ status: 'ignored', reason: 'only processing call_ended' });
     }
     
     const transcript = call?.transcript;

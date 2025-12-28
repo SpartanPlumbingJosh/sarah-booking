@@ -167,9 +167,16 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   
   try {
-    const { first_name, last_name, phone, street, city, state, zip, issue, day, time_window, customer_id } = req.body;
+    // Parameter aliasing - accept both Retell tool schema and direct formats
+    const first_name = req.body.first_name || (req.body.customer_name?.split(' ')[0]) || null;
+    const last_name = req.body.last_name || (req.body.customer_name?.split(' ').slice(1).join(' ')) || '';
+    const issue = req.body.issue || req.body.issue_description;
+    const day = req.body.day || req.body.preferred_date;
+    
+    const { phone, street, city, state, zip, time_window, customer_id } = req.body;
     
     console.log('[BOOK] Request:', JSON.stringify(req.body, null, 2));
+    console.log('[BOOK] Resolved: first_name=%s, last_name=%s, issue=%s, day=%s', first_name, last_name, issue, day);
     
     const missing = [];
     if (!first_name) missing.push('first name');

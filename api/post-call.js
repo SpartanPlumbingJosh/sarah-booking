@@ -105,7 +105,7 @@ ${transcript}
   "should_book": true if agent said "you're all set" or confirmed an appointment. false if customer declined or hung up early,
   "first_name": "string or null",
   "last_name": "string or null", 
-  "phone": "the phone number they SAID on the call (digits only), or ${cleanPhone} if they didn't give one",
+  "phone": "Convert the phone number the customer SPOKE to digits (five=5, six=6, etc). Return exactly 10 digits. ONLY use ${cleanPhone} if they never stated a phone number",
   "street": "street address THEY SAID on the call or null",
   "city": "city THEY SAID on the call or null",
   "state": "state or OH",
@@ -386,10 +386,12 @@ async function postToSlack(call, parsed, bookingResult) {
     
     const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = bookingResult?.address || [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
-    const fromNumber = call?.from_number || 'Unknown';
+    const callerID = call?.from_number || 'Unknown';
+    const spokenPhone = parsed?.phone || null;
+    const phoneDisplay = spokenPhone ? (spokenPhone !== callerID.replace(/\D/g, '') ? `${spokenPhone} (caller ID: ${callerID})` : spokenPhone) : callerID;
     const recordingUrl = call?.recording_url || null;
     
-    let messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${fromNumber}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}`;
+    let messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${phoneDisplay}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}`;
     
     if (recordingUrl) {
       messageText += `\n\n🎧 <${recordingUrl}|Listen to Recording>`;

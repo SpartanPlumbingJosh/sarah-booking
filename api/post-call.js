@@ -387,8 +387,15 @@ async function postToSlack(call, parsed, bookingResult) {
     const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = bookingResult?.address || [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
     const fromNumber = call?.from_number || 'Unknown';
+    const recordingUrl = call?.recording_url || null;
     
-    const messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${fromNumber}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
+    let messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${fromNumber}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}`;
+    
+    if (recordingUrl) {
+      messageText += `\n\n🎧 <${recordingUrl}|Listen to Recording>`;
+    }
+    
+    messageText += `\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
 
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',

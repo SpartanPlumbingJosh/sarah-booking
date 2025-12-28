@@ -1,7 +1,7 @@
 const bookAppointment = require('./book-appointment');
 const fetch = require('node-fetch');
 
-async function postToSlack(call, bookingResult) {
+async function postToSlack(call, bookingResult, wasLead) {
   const token = process.env.SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_TRANSCRIPT_CHANNEL;
   
@@ -15,50 +15,58 @@ async function postToSlack(call, bookingResult) {
     const transcript = call?.transcript || 'No transcript available';
     const duration = call?.call_duration_ms ? Math.round(call.call_duration_ms / 1000) : 0;
     const fromNumber = call?.from_number || 'Unknown';
-    const callId = call?.call_id || 'Unknown';
+    const disconnectReason = call?.disconnection_reason || 'unknown';
     
-    // Format duration
+    // Format duration as M:SS
     const mins = Math.floor(duration / 60);
     const secs = duration % 60;
     const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
     
-    // Build message
-    let statusEmoji = '📞';
-    let statusText = 'Call Ended';
+    // Determine status and color
+    let headerEmoji, headerText, statusLine;
     
     if (bookingResult?.success) {
-      statusEmoji = '✅';
-      statusText = `Booked - Job #${bookingResult.job_id}`;
-    } else if (analysis.booking_confirmed === false) {
-      statusEmoji = '❌';
-      statusText = 'Not Booked';
+      // GREEN - Booked
+      headerEmoji = '✅';
+      headerText = 'Booked';
+      statusLine = `${durationStr} | Booked | Job #${bookingResult.job_id}`;
+    } else if (!wasLead) {
+      // YELLOW - Not a lead (non-booking call like existing customer question, wrong number, etc)
+      headerEmoji = '🟡';
+      headerText = 'Not a Lead';
+      statusLine = `${durationStr} | Not a Lead | ${disconnectReason}`;
+    } else {
+      // RED - Unbooked (was a lead but didn't book)
+      headerEmoji = '❌';
+      headerText = 'Unbooked';
+      statusLine = `${durationStr} | Unbooked | ${disconnectReason}`;
     }
     
     const customerName = [analysis.first_name, analysis.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const address = [analysis.street, analysis.city, analysis.state, analysis.zip].filter(Boolean).join(', ') || 'Not provided';
     const issue = analysis.issue || analysis.call_summary || 'No issue recorded';
     
     const blocks = [
       {
-        type: 'header',
-        text: { type: 'plain_text', text: `${statusEmoji} ${statusText}`, emoji: true }
+        type: 'section',
+        text: { 
+          type: 'mrkdwn', 
+          text: `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone Number:* ${fromNumber}\n*Summary of Call:* ${issue}` 
+        }
       },
       {
-        type: 'section',
-        fields: [
-          { type: 'mrkdwn', text: `*Customer:*\n${customerName}` },
-          { type: 'mrkdwn', text: `*Phone:*\n${fromNumber}` },
-          { type: 'mrkdwn', text: `*Duration:*\n${durationStr}` },
-          { type: 'mrkdwn', text: `*Call ID:*\n${callId.slice(-8)}` }
+        type: 'context',
+        elements: [
+          { type: 'mrkdwn', text: `⏱️ ${statusLine}` }
         ]
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*Issue:*\n${issue}` }
       },
       { type: 'divider' },
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: `*Transcript:*\n\`\`\`${transcript.slice(0, 2500)}${transcript.length > 2500 ? '...' : ''}\`\`\`` }
+        text: { 
+          type: 'mrkdwn', 
+          text: `*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\`` 
+        }
       }
     ];
     
@@ -71,7 +79,7 @@ async function postToSlack(call, bookingResult) {
       body: JSON.stringify({
         channel,
         blocks,
-        text: `${statusEmoji} ${statusText} - ${customerName}`
+        text: `${headerEmoji} ${headerText} - ${customerName}`
       })
     });
     
@@ -79,6 +87,26 @@ async function postToSlack(call, bookingResult) {
   } catch (err) {
     console.error('Slack post error:', err.message);
   }
+}
+
+// Determine if call was a lead based on analysis
+function isLead(analysis, call) {
+  // If they provided address info or discussed scheduling, it's a lead
+  if (analysis?.street || analysis?.city || analysis?.zip) return true;
+  if (analysis?.appointment_day || analysis?.time_window) return true;
+  if (analysis?.issue && analysis.issue.length > 20) return true;
+  
+  // Check transcript for lead indicators
+  const transcript = call?.transcript?.toLowerCase() || '';
+  const leadPhrases = ['schedule', 'appointment', 'come out', 'available', 'book', 'service', 'fix', 'repair', 'leak', 'clog', 'drain', 'water heater', 'plumb'];
+  if (leadPhrases.some(phrase => transcript.includes(phrase))) return true;
+  
+  // Short calls with no issue are likely not leads
+  const duration = call?.call_duration_ms || 0;
+  if (duration < 30000 && !analysis?.issue) return false;
+  
+  // Default to assuming it's a lead
+  return true;
 }
 
 module.exports = async (req, res) => {
@@ -120,11 +148,14 @@ module.exports = async (req, res) => {
       await bookAppointment(mockReq, mockRes);
     }
     
+    // Determine if this was a lead
+    const wasLead = isLead(analysis, call);
+    
     // Post transcript to Slack
-    await postToSlack(call, bookingResult);
+    await postToSlack(call, bookingResult, wasLead);
     
     return res.json({ 
-      status: bookingResult?.success ? 'booked' : (analysis?.booking_confirmed ? 'failed' : 'not_confirmed'),
+      status: bookingResult?.success ? 'booked' : (wasLead ? 'unbooked' : 'not_lead'),
       ...bookingResult 
     });
     

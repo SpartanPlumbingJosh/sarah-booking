@@ -11,20 +11,22 @@ async function postToSlack(call, bookingResult, wasLead) {
   }
   
   try {
-    // Retell can send analysis in multiple places - check all of them
-    const analysis = call?.call_analysis || call?.custom_analysis_data || call?.post_call_analysis_data || {};
+    // Get the actual analysis data - Retell nests it under custom_analysis_data
+    const callAnalysis = call?.call_analysis || {};
+    const analysis = callAnalysis?.custom_analysis_data || callAnalysis || {};
+    
     const transcript = call?.transcript || call?.transcript_object?.map(t => `${t.role}: ${t.content}`).join('\n') || 'No transcript available';
     
-    // Duration comes in different formats
+    // Duration from duration_ms or timestamps
     let duration = 0;
-    if (call?.call_duration_ms) {
-      duration = Math.round(call.call_duration_ms / 1000);
+    if (call?.duration_ms) {
+      duration = Math.round(call.duration_ms / 1000);
     } else if (call?.end_timestamp && call?.start_timestamp) {
       duration = Math.round((call.end_timestamp - call.start_timestamp) / 1000);
     }
     
     const fromNumber = call?.from_number || call?.caller_number || 'Unknown';
-    const disconnectReason = call?.disconnection_reason || call?.end_reason || 'unknown';
+    const disconnectReason = call?.disconnection_reason || 'unknown';
     
     const mins = Math.floor(duration / 60);
     const secs = duration % 60;
@@ -48,19 +50,9 @@ async function postToSlack(call, bookingResult, wasLead) {
     
     const customerName = [analysis.first_name, analysis.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = [analysis.street, analysis.city, analysis.state, analysis.zip].filter(Boolean).join(', ') || 'Not provided';
-    const issue = analysis.issue || analysis.call_summary || 'No summary provided';
+    const issue = analysis.issue || callAnalysis.call_summary || 'No summary provided';
     
-    const messageText = `${headerEmoji} *${headerText}*
-
-*Name:* ${customerName}
-*Address:* ${address}
-*Phone Number:* ${fromNumber}
-*Summary of Call:* ${issue}
-
-⏱️ ${durationStr} | ${statusText}
-
-*Transcript:*
-\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
+    const messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone Number:* ${fromNumber}\n*Summary of Call:* ${issue}\n\n⏱️ ${durationStr} | ${statusText}\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
 
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -106,7 +98,7 @@ function isLead(analysis, call) {
   if (analysis?.issue && analysis.issue.length > 15) return true;
   
   // Very short calls are likely not leads
-  const duration = call?.call_duration_ms || 0;
+  const duration = call?.duration_ms || 0;
   if (duration < 30000) return false;
   
   // Default: calls over 1 min are probably leads
@@ -119,10 +111,10 @@ module.exports = async (req, res) => {
   try {
     const payload = req.body;
     
-    // Log full payload for debugging
-    console.log('Webhook payload:', JSON.stringify(payload, null, 2));
+    console.log('=== POST-CALL WEBHOOK ===');
+    console.log('Full payload:', JSON.stringify(payload, null, 2));
     
-    // Retell sends { event: 'call_ended', call: {...} } OR just the call object directly
+    // Retell sends { event: 'call_ended', call: {...} } OR { event: 'call_analyzed', call: {...} }
     const event = payload?.event || 'call_ended';
     const call = payload?.call || payload;
     
@@ -130,44 +122,54 @@ module.exports = async (req, res) => {
       return res.json({ status: 'ignored', reason: `event is ${event}` });
     }
     
-    // Get analysis from wherever Retell put it
-    const analysis = call?.call_analysis || call?.custom_analysis_data || call?.post_call_analysis_data || {};
+    // IMPORTANT: Retell nests the data under call_analysis.custom_analysis_data
+    const callAnalysis = call?.call_analysis || {};
+    const analysis = callAnalysis?.custom_analysis_data || callAnalysis || {};
     
-    console.log('Analysis data:', JSON.stringify(analysis, null, 2));
+    console.log('Call analysis:', JSON.stringify(callAnalysis, null, 2));
+    console.log('Extracted analysis:', JSON.stringify(analysis, null, 2));
     
     let bookingResult = null;
     
     // Check if booking confirmed (handle both boolean and string)
     const bookingConfirmed = analysis?.booking_confirmed === true || analysis?.booking_confirmed === 'true';
     
+    console.log('Booking confirmed?', bookingConfirmed);
+    console.log('Has first_name?', !!analysis?.first_name);
+    console.log('Has street?', !!analysis?.street);
+    
     if (bookingConfirmed && analysis?.first_name && analysis?.street) {
-      console.log('Booking confirmed, creating job...');
+      console.log('=== CREATING JOB ===');
       
-      const mockReq = {
-        method: 'POST',
-        body: {
-          first_name: analysis.first_name,
-          last_name: analysis.last_name,
-          phone: analysis.phone || call?.from_number?.replace(/\D/g, ''),
-          street: analysis.street,
-          city: analysis.city,
-          state: analysis.state || 'OH',
-          zip: analysis.zip,
-          issue: analysis.issue || analysis.call_summary || 'Service call',
-          day: analysis.appointment_day,
-          time_window: analysis.time_window
-        }
+      // Get phone from analysis or call
+      const phone = analysis.phone || call?.from_number?.replace(/\\D/g, '');
+      
+      const bookingData = {
+        first_name: analysis.first_name,
+        last_name: analysis.last_name || '',
+        phone: phone,
+        street: analysis.street,
+        city: analysis.city || '',
+        state: analysis.state || 'OH',
+        zip: analysis.zip || '',
+        issue: analysis.issue || callAnalysis.call_summary || 'Service call',
+        day: analysis.appointment_day || '',
+        time_window: analysis.time_window || 'morning'
       };
       
-      console.log('Booking request:', JSON.stringify(mockReq.body, null, 2));
+      console.log('Booking data:', JSON.stringify(bookingData, null, 2));
       
+      const mockReq = { method: 'POST', body: bookingData };
       const mockRes = { 
         json: (data) => { bookingResult = data; return mockRes; }, 
         status: () => mockRes 
       };
       
       await bookAppointment(mockReq, mockRes);
-      console.log('Booking result:', JSON.stringify(bookingResult, null, 2));
+      console.log('=== BOOKING RESULT ===');
+      console.log(JSON.stringify(bookingResult, null, 2));
+    } else {
+      console.log('Skipping job creation - missing required data');
     }
     
     const wasLead = isLead(analysis, call);

@@ -33,9 +33,10 @@ async function getAccessToken() {
 
 async function lookupCustomer(cleanPhone) {
   const token = await getAccessToken();
-  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${cleanPhone}&pageSize=10`;
+  // Use 'phone' parameter per ST API spec (not 'phoneNumber')
+  const url = `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${cleanPhone}&pageSize=5`;
   
-  console.log('[CHECK-CUSTOMER] URL:', url);
+  console.log('[CHECK-CUSTOMER] Searching:', cleanPhone);
   
   const response = await fetch(url, {
     headers: {
@@ -45,9 +46,23 @@ async function lookupCustomer(cleanPhone) {
   });
   
   const data = await response.json();
+  console.log('[CHECK-CUSTOMER] Found', (data.data || []).length, 'customers');
   
-  // Return raw for debugging
-  return { raw: data, count: (data.data || []).length };
+  if (data.data && data.data.length > 0) {
+    const customer = data.data[0];
+    const address = customer.address || {};
+    return {
+      found: true,
+      customer_id: customer.id,
+      customer_name: customer.name,
+      street: address.street || '',
+      city: address.city || '',
+      state: address.state || '',
+      zip: address.zip || ''
+    };
+  }
+  
+  return { found: false, customer_id: null };
 }
 
 module.exports = async (req, res) => {
@@ -57,10 +72,23 @@ module.exports = async (req, res) => {
   
   try {
     let phone = req.body?.phone;
-    const debug = req.body?.debug === true;
+    
+    if (phone && phone.includes('{{')) {
+      phone = null;
+    }
+    
+    if (!phone && req.body?.call?.from_number) {
+      phone = req.body.call.from_number;
+    }
+    if (!phone && req.body?.from_number) {
+      phone = req.body.from_number;
+    }
     
     if (!phone) {
-      return res.json({ result: "What's a good callback number for you?", need_phone: true });
+      return res.json({ 
+        result: "What's a good callback number for you?",
+        need_phone: true
+      });
     }
     
     const cleanPhone = String(phone).replace(/\D/g, '');
@@ -68,39 +96,38 @@ module.exports = async (req, res) => {
       ? cleanPhone.slice(1) : cleanPhone;
     
     if (normalizedPhone.length !== 10) {
-      return res.json({ result: "Can you give me the full number with area code?", need_phone: true });
+      return res.json({ 
+        result: "Can you give me the full number with area code?",
+        need_phone: true
+      });
     }
     
     const lookup = await lookupCustomer(normalizedPhone);
     
-    if (debug) {
-      return res.json({ 
-        searched_phone: normalizedPhone,
-        results_count: lookup.count,
-        raw_response: lookup.raw
-      });
-    }
-    
-    // Normal flow
-    if (lookup.raw.data && lookup.raw.data.length > 0) {
-      const customer = lookup.raw.data[0];
-      const address = customer.address || {};
+    if (lookup.found) {
       return res.json({
         result: "Got it.",
         found: true,
-        customer_id: customer.id,
-        customer_name: customer.name,
-        street: address.street || '',
-        city: address.city || '',
-        state: address.state || '',
-        zip: address.zip || ''
+        customer_id: lookup.customer_id,
+        customer_name: lookup.customer_name,
+        street: lookup.street,
+        city: lookup.city,
+        state: lookup.state,
+        zip: lookup.zip
       });
     }
     
-    return res.json({ result: "Got it.", found: false, customer_id: null });
+    return res.json({ 
+      result: "Got it.",
+      found: false,
+      customer_id: null 
+    });
     
   } catch (error) {
     console.error('[CHECK-CUSTOMER] Error:', error.message);
-    return res.json({ result: "Got it.", error: error.message });
+    return res.json({ 
+      result: "Got it.",
+      error: error.message
+    });
   }
 };

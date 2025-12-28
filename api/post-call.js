@@ -79,8 +79,9 @@ async function findCustomerByPhone(phone) {
   return null;
 }
 
-// Parse transcript using Claude
 async function parseTranscript(transcript, callerPhone) {
+  const cleanPhone = callerPhone ? callerPhone.replace(/\D/g, '') : '';
+  
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -93,31 +94,28 @@ async function parseTranscript(transcript, callerPhone) {
       max_tokens: 1024,
       messages: [{
         role: 'user',
-        content: `Extract booking info from this plumbing company call transcript. Return ONLY valid JSON.
+        content: `Extract booking info from this plumbing call. Return ONLY valid JSON.
 
-Caller phone: ${callerPhone}
+Caller phone: ${cleanPhone}
 
 Transcript:
 ${transcript}
 
-Extract:
 {
-  "should_book": true/false (false if: customer declined service, hung up early, was just asking questions, said they'd call back, or no appointment day/time was confirmed),
+  "should_book": true if agent said "you're all set" or confirmed an appointment. false if customer declined or hung up early,
   "first_name": "string or null",
   "last_name": "string or null", 
-  "phone": "digits only from caller phone above",
+  "phone": "${cleanPhone}",
   "street": "street address or null",
   "city": "string or null",
-  "state": "2 letter abbrev, default OH",
+  "state": "OH",
   "zip": "5 digits or null",
-  "issue": "brief description of plumbing problem",
-  "day": "day of week they chose or null",
-  "time_window": "morning, midday, or afternoon or null",
-  "service_tier": "shield, standard, or economy",
-  "notification_pref": "text or call"
+  "issue": "plumbing problem description",
+  "day": "day of week or null",
+  "time_window": "morning/midday/afternoon or null"
 }
 
-IMPORTANT: should_book is ONLY true if customer confirmed an appointment with a specific day AND time window. Return ONLY JSON.`
+Return ONLY JSON.`
       }]
     })
   });
@@ -130,7 +128,7 @@ IMPORTANT: should_book is ONLY true if customer confirmed an appointment with a 
   } catch (e) {
     const match = text.match(/\{[\s\S]*\}/);
     if (match) return JSON.parse(match[0]);
-    throw new Error('Failed to parse transcript extraction');
+    throw new Error('Failed to parse transcript');
   }
 }
 
@@ -197,38 +195,62 @@ function getNextBusinessDay(preferredDay) {
   };
 }
 
-async function createBooking(parsed) {
-  const cleanPhone = String(parsed.phone).replace(/\D/g, '');
+// ALWAYS BOOK IF should_book IS TRUE - fill in gaps with defaults or ST data
+async function createBooking(parsed, callerPhone) {
+  const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
   const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
     ? cleanPhone.slice(1) : cleanPhone;
   
-  const customerName = parsed.last_name 
-    ? `${parsed.first_name} ${parsed.last_name}` 
-    : parsed.first_name;
-  
   let customerId = null;
   let locationId = null;
+  let customerName = null;
+  let street = parsed.street;
+  let city = parsed.city;
+  let state = parsed.state || 'OH';
+  let zip = parsed.zip;
   
+  // Check for existing customer - use their data to fill gaps
   const existingCustomer = await findCustomerByPhone(normalizedPhone);
   if (existingCustomer) {
     customerId = existingCustomer.id;
-    console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
+    customerName = existingCustomer.name;
+    console.log('[POST-CALL] Found existing customer:', customerId, customerName);
+    
+    // Fill in from ST if we're missing data
+    const addr = existingCustomer.address || {};
+    if (!street) street = addr.street;
+    if (!city) city = addr.city;
+    if (!zip) zip = addr.zip;
+    if (addr.state) state = addr.state;
+    
     const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
     if (locations.data?.length > 0) {
       locationId = locations.data[0].id;
     }
   }
   
+  // Build customer name from parsed if not existing
+  if (!customerName) {
+    customerName = parsed.last_name 
+      ? `${parsed.first_name || 'Customer'} ${parsed.last_name}` 
+      : (parsed.first_name || 'Customer');
+  }
+  
+  // DEFAULTS - book it anyway, can follow up for details
+  if (!street) street = 'NEEDS ADDRESS';
+  if (!city) city = 'NEEDS CITY';
+  if (!zip) zip = '45402'; // Dayton default
+  
   if (!customerId) {
     console.log('[POST-CALL] Creating new customer:', customerName);
     const customerResult = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
       name: customerName,
       type: 'Residential',
-      address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+      address: { street, city, state, zip, country: 'USA' },
       contacts: [{ type: 'MobilePhone', value: normalizedPhone }],
       locations: [{
         name: customerName,
-        address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+        address: { street, city, state, zip, country: 'USA' },
         contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
       }]
     });
@@ -240,18 +262,23 @@ async function createBooking(parsed) {
     const newLoc = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
       customerId,
       name: customerName,
-      address: { street: parsed.street, city: parsed.city, state: parsed.state || 'OH', zip: parsed.zip, country: 'USA' },
+      address: { street, city, state, zip, country: 'USA' },
       contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
     });
     locationId = newLoc.id;
   }
   
+  // Default to next business day morning if no time specified
   const apptDate = getNextBusinessDay(parsed.day);
-  const window = CONFIG.ARRIVAL_WINDOWS[parsed.time_window] || CONFIG.ARRIVAL_WINDOWS.morning;
+  const timeWindow = parsed.time_window || 'morning';
+  const window = CONFIG.ARRIVAL_WINDOWS[timeWindow] || CONFIG.ARRIVAL_WINDOWS.morning;
   const startUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.startHour);
   const endUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.endHour);
   
-  const isDrain = /drain|sewer|clog|backup|snake/i.test(parsed.issue);
+  const issue = parsed.issue || 'Service call - see transcript';
+  const isDrain = /drain|sewer|clog|backup|snake/i.test(issue);
+  
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   
   const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
     customerId,
@@ -259,7 +286,7 @@ async function createBooking(parsed) {
     businessUnitId: isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING,
     jobTypeId: isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE,
     priority: 'Normal',
-    summary: parsed.issue,
+    summary: issue,
     campaignId: CONFIG.CAMPAIGN_ID,
     appointments: [{
       start: startUTC,
@@ -271,21 +298,26 @@ async function createBooking(parsed) {
   
   console.log('[POST-CALL] Job created:', job.id);
   
+  // Flag if we're missing data
+  const missingData = [];
+  if (parsed.street === null) missingData.push('address');
+  if (parsed.city === null) missingData.push('city');
+  if (parsed.zip === null) missingData.push('zip');
+  if (parsed.first_name === null) missingData.push('name');
+  
   return {
     success: true,
     job_id: job.id,
     customer_id: customerId,
     customer_name: customerName,
-    day: parsed.day,
-    time_window: parsed.time_window
+    day: dayNames[apptDate.dayOfWeek],
+    time_window: timeWindow,
+    missing_data: missingData.length > 0 ? missingData : null
   };
 }
 
 async function postToSlack(call, parsed, bookingResult) {
-  if (!CONFIG.SLACK_BOT_TOKEN || !CONFIG.SLACK_TRANSCRIPT_CHANNEL) {
-    console.log('[POST-CALL] Slack not configured');
-    return;
-  }
+  if (!CONFIG.SLACK_BOT_TOKEN || !CONFIG.SLACK_TRANSCRIPT_CHANNEL) return;
   
   try {
     const transcript = call?.transcript || 'No transcript';
@@ -300,17 +332,21 @@ async function postToSlack(call, parsed, bookingResult) {
       headerEmoji = '✅';
       headerText = 'Booked';
       statusText = `Job #${bookingResult.job_id} | ${bookingResult.day} ${bookingResult.time_window}`;
+      if (bookingResult.missing_data) {
+        headerEmoji = '⚠️';
+        statusText += ` | MISSING: ${bookingResult.missing_data.join(', ')}`;
+      }
     } else if (parsed?.should_book === false) {
       headerEmoji = '🟡';
       headerText = 'No Booking';
-      statusText = 'Customer did not schedule';
+      statusText = 'Customer did not confirm appointment';
     } else {
       headerEmoji = '❌';
       headerText = 'Failed';
-      statusText = 'Missing required info';
+      statusText = 'Booking failed - check logs';
     }
     
-    const customerName = [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
     const address = [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
     const fromNumber = call?.from_number || 'Unknown';
     
@@ -356,7 +392,6 @@ module.exports = async (req, res) => {
     }
     
     console.log('[POST-CALL] Processing call from:', callerPhone);
-    console.log('[POST-CALL] Transcript:', transcript.slice(0, 500));
     
     // Parse transcript with Claude
     const parsed = await parseTranscript(transcript, callerPhone);
@@ -364,20 +399,14 @@ module.exports = async (req, res) => {
     
     let bookingResult = null;
     
+    // IF SHOULD_BOOK IS TRUE, WE BOOK IT. PERIOD.
     if (parsed.should_book) {
-      const required = ['first_name', 'phone', 'street', 'city', 'zip', 'issue', 'day', 'time_window'];
-      const missing = required.filter(f => !parsed[f]);
-      
-      if (missing.length > 0) {
-        console.log('[POST-CALL] Missing required:', missing);
-      } else {
-        bookingResult = await createBooking(parsed);
-      }
+      console.log('[POST-CALL] should_book=true, creating booking...');
+      bookingResult = await createBooking(parsed, callerPhone);
     } else {
-      console.log('[POST-CALL] should_book is false - no booking');
+      console.log('[POST-CALL] should_book=false, no booking');
     }
     
-    // Post to Slack
     await postToSlack(call, parsed, bookingResult);
     
     return res.status(200).json({

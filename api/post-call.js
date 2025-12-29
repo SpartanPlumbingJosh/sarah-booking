@@ -252,29 +252,39 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   let customerId = null;
   let locationId = null;
   
-  // Check for existing customer
+  // Check for existing customer by phone
   const existingCustomer = await findCustomerByPhone(lookupPhone);
   if (existingCustomer) {
     customerId = existingCustomer.id;
     console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
     
+    // ONLY use existing customer name if Sarah didn't extract one
     if (!extracted.customer_first_name) {
       customerName = existingCustomer.name || customerName;
     }
     
-    // Get existing location
-    try {
-      const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
-      if (locations.data && locations.data.length > 0) {
-        const existingLoc = locations.data[0];
-        locationId = existingLoc.id;
-        
-        if (!street) street = existingLoc.address?.street;
-        if (!city) city = existingLoc.address?.city;
-        if (!zip) zip = existingLoc.address?.zip;
+    // Check if Sarah extracted an address
+    const hasExtractedAddress = extracted.customer_street && extracted.customer_street.length > 0;
+    
+    if (hasExtractedAddress) {
+      // Sarah gave us an address - use it (might be different property)
+      console.log('[POST-CALL] Using extracted address:', street, city, zip);
+      // locationId stays null - will create new location below
+    } else {
+      // No extracted address - try to use existing location
+      try {
+        const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
+        if (locations.data && locations.data.length > 0) {
+          const existingLoc = locations.data[0];
+          locationId = existingLoc.id;
+          street = existingLoc.address?.street || street;
+          city = existingLoc.address?.city || city;
+          zip = existingLoc.address?.zip || zip;
+          console.log('[POST-CALL] Using existing location:', locationId);
+        }
+      } catch (e) {
+        console.log('[POST-CALL] Could not fetch existing location');
       }
-    } catch (e) {
-      console.log('[POST-CALL] Could not fetch existing location');
     }
   }
   
@@ -527,6 +537,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 
 

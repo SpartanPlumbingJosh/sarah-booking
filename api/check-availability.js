@@ -12,8 +12,13 @@ let tokenExpiry = 0;
 
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60000) {
+    console.log('[AVAILABILITY] Using cached token');
     return cachedToken;
   }
+  
+  console.log('[AVAILABILITY] Getting new token from auth-integration...');
+  console.log('[AVAILABILITY] Client ID:', CONFIG.ST_CLIENT_ID ? 'present' : 'MISSING');
+  console.log('[AVAILABILITY] Client Secret:', CONFIG.ST_CLIENT_SECRET ? 'present' : 'MISSING');
   
   const response = await fetch('https://auth-integration.servicetitan.io/connect/token', {
     method: 'POST',
@@ -25,7 +30,17 @@ async function getAccessToken() {
     })
   });
   
-  const data = await response.json();
+  const responseText = await response.text();
+  console.log('[AVAILABILITY] Auth response status:', response.status);
+  
+  if (!response.ok) {
+    console.error('[AVAILABILITY] Auth failed:', responseText.substring(0, 300));
+    return null;
+  }
+  
+  const data = JSON.parse(responseText);
+  console.log('[AVAILABILITY] Got token:', data.access_token ? 'yes (' + data.access_token.substring(0,20) + '...)' : 'NO TOKEN');
+  
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in * 1000);
   return cachedToken;
@@ -230,4 +245,5 @@ module.exports = async (req, res) => {
     });
   }
 };
+
 

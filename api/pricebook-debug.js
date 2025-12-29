@@ -32,37 +32,60 @@ async function getAccessToken() {
 module.exports = async (req, res) => {
   try {
     const token = await getAccessToken();
-    const search = req.query.search || 'dispatch';
+    const search = (req.query.search || '').toLowerCase();
     
-    // Search pricebook services
-    const response = await fetch(
-      `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=True&pageSize=50`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'ST-App-Key': CONFIG.ST_APP_KEY
+    // Get ALL services (paginate if needed)
+    let allServices = [];
+    let page = 1;
+    let hasMore = true;
+    
+    while (hasMore && page <= 10) {
+      const response = await fetch(
+        `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=Any&pageSize=200&page=${page}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'ST-App-Key': CONFIG.ST_APP_KEY
+          }
         }
+      );
+      
+      const data = await response.json();
+      
+      if (data.data && data.data.length > 0) {
+        allServices = allServices.concat(data.data);
+        hasMore = data.hasMore;
+        page++;
+      } else {
+        hasMore = false;
       }
-    );
+    }
     
-    const data = await response.json();
+    // Filter if search provided
+    let services = allServices;
+    if (search) {
+      services = allServices.filter(s => 
+        (s.name || '').toLowerCase().includes(search) || 
+        (s.code || '').toLowerCase().includes(search)
+      );
+    }
     
-    // Filter services matching search term
-    const services = (data.data || [])
-      .filter(s => s.name.toLowerCase().includes(search.toLowerCase()) || s.code.toLowerCase().includes(search.toLowerCase()))
-      .map(s => ({
-        id: s.id,
-        code: s.code,
-        name: s.name,
-        price: s.price
-      }));
+    // Map to simple format
+    const result = services.map(s => ({
+      id: s.id,
+      code: s.code,
+      name: s.name,
+      price: s.price,
+      active: s.active
+    }));
     
     return res.json({
-      search: search,
-      total: services.length,
-      services: services
+      search: search || '(all)',
+      totalInPricebook: allServices.length,
+      matchingServices: result.length,
+      services: result.slice(0, 50)
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message, stack: error.stack });
   }
 };

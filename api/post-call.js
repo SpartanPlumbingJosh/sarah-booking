@@ -254,32 +254,54 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   
   // Check for existing customer by phone
   const existingCustomer = await findCustomerByPhone(lookupPhone);
-  if (existingCustomer) {
-    customerId = existingCustomer.id;
-    console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
+  
+  // Determine if Sarah extracted new customer info
+  const hasExtractedName = extracted.customer_first_name && extracted.customer_first_name.length > 0;
+  const hasExtractedAddress = extracted.customer_street && extracted.customer_street.length > 0;
+  
+  if (existingCustomer && hasExtractedName) {
+    // Compare names - if different, this is a NEW customer (caller booking for someone else)
+    const existingNameLower = (existingCustomer.name || '').toLowerCase();
+    const extractedNameLower = customerName.toLowerCase();
+    const firstNameMatch = existingNameLower.includes(extracted.customer_first_name.toLowerCase());
     
-    // ONLY use existing customer name if Sarah didn't extract one
-    if (!extracted.customer_first_name) {
-      customerName = existingCustomer.name || customerName;
-    }
-    
-    // Check if Sarah extracted an address
-    const hasExtractedAddress = extracted.customer_street && extracted.customer_street.length > 0;
-    
-    if (hasExtractedAddress) {
-      // Sarah gave us an address - use it (might be different property)
-      console.log('[POST-CALL] Using extracted address:', street, city, zip);
-      // locationId stays null - will create new location below
-    } else {
-      // No extracted address - try to use existing location
+    if (firstNameMatch && !hasExtractedAddress) {
+      // Same person, no new address - use existing customer and location
+      customerId = existingCustomer.id;
+      customerName = existingCustomer.name;
+      console.log('[POST-CALL] Using existing customer (name matches):', customerId, customerName);
+      
       try {
         const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
         if (locations.data && locations.data.length > 0) {
-          const existingLoc = locations.data[0];
-          locationId = existingLoc.id;
-          street = existingLoc.address?.street || street;
-          city = existingLoc.address?.city || city;
-          zip = existingLoc.address?.zip || zip;
+          locationId = locations.data[0].id;
+          street = locations.data[0].address?.street || street;
+          city = locations.data[0].address?.city || city;
+          zip = locations.data[0].address?.zip || zip;
+          console.log('[POST-CALL] Using existing location:', locationId);
+        }
+      } catch (e) {
+        console.log('[POST-CALL] Could not fetch existing location');
+      }
+    } else {
+      // Different name OR new address - create NEW customer with Sarah's data
+      console.log('[POST-CALL] Creating new customer - extracted name:', customerName, '| existing:', existingCustomer.name);
+      // customerId stays null - will create below
+    }
+  } else if (existingCustomer && !hasExtractedName) {
+    // No extracted name - use existing customer
+    customerId = existingCustomer.id;
+    customerName = existingCustomer.name || customerName;
+    console.log('[POST-CALL] Using existing customer (no extracted name):', customerId, customerName);
+    
+    if (!hasExtractedAddress) {
+      try {
+        const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
+        if (locations.data && locations.data.length > 0) {
+          locationId = locations.data[0].id;
+          street = locations.data[0].address?.street || street;
+          city = locations.data[0].address?.city || city;
+          zip = locations.data[0].address?.zip || zip;
           console.log('[POST-CALL] Using existing location:', locationId);
         }
       } catch (e) {

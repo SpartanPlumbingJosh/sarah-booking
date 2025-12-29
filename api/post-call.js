@@ -312,11 +312,28 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   
   // Create new customer if needed
   if (!customerId) {
-    const nameParts = customerName.split(' ');
+    const addressObj = { 
+      street: street || 'TBD', 
+      city: city || 'Dayton', 
+      state, 
+      zip: zip || '45402', 
+      country: 'USA' 
+    };
+    
+    // ServiceTitan requires locations array when creating customer
     const newCustomer = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
       name: customerName,
       type: 'Residential',
-      address: { street: street || 'TBD', city: city || 'Dayton', state, zip: zip || '45402', country: 'USA' },
+      address: addressObj,
+      locations: [{
+        name: customerName,
+        address: addressObj,
+        contacts: [{
+          type: 'Phone',
+          value: contactPhone,
+          memo: 'Primary'
+        }]
+      }],
       contacts: [{
         type: 'Phone',
         value: contactPhone,
@@ -325,10 +342,21 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
     });
     customerId = newCustomer.id;
     console.log('[POST-CALL] Created customer:', customerId);
+    
+    // Get the location that was created with the customer
+    try {
+      const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
+      if (locations.data && locations.data.length > 0) {
+        locationId = locations.data[0].id;
+        console.log('[POST-CALL] Got location from new customer:', locationId);
+      }
+    } catch (e) {
+      console.log('[POST-CALL] Could not fetch location for new customer');
+    }
   }
   
-  // Create location if needed
-  if (!locationId) {
+  // Create location if still needed (existing customer, new address)
+  if (!locationId && customerId) {
     const newLocation = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
       customerId,
       name: customerName,
@@ -340,7 +368,7 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
       }]
     });
     locationId = newLocation.id;
-    console.log('[POST-CALL] Created location:', locationId);
+    console.log('[POST-CALL] Created new location for existing customer:', locationId);
   }
   
   // Determine service type

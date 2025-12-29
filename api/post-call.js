@@ -520,53 +520,115 @@ async function postToSlack(call, extracted, bookingResult) {
     const secs = duration % 60;
     const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
     
-    let headerEmoji, headerText, statusText;
+    // Format phone numbers
+    const formatPhone = (phone) => {
+      if (!phone) return 'Unknown';
+      let digits = phone.replace(/\D/g, '');
+      if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+      if (digits.length === 10) return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
+      return phone;
+    };
+    
+    const callerPhone = formatPhone(call?.from_number);
+    const trackingNum = call?.to_number || 'Unknown';
+    
+    // Look up customer in ServiceTitan
+    let customerName = extracted?.customer_first_name && extracted?.customer_last_name 
+      ? `${extracted.customer_first_name} ${extracted.customer_last_name}`.trim()
+      : null;
+    let recentJobs = [];
+    let isExistingCustomer = false;
+    
+    if (call?.from_number) {
+      const phoneDigits = call.from_number.replace(/\D/g, '').slice(-10);
+      try {
+        const searchResp = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${phoneDigits}&pageSize=1`);
+        if (searchResp.status === 200 && searchResp.data?.data?.length > 0) {
+          const customer = searchResp.data.data[0];
+          isExistingCustomer = true;
+          if (!customerName) customerName = customer.name;
+          
+          // Get recent jobs
+          const jobsResp = await stApi('GET', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs?customerId=${customer.id}&pageSize=5`);
+          if (jobsResp.status === 200 && jobsResp.data?.data?.length > 0) {
+            recentJobs = jobsResp.data.data.map(job => ({
+              number: job.number || job.id,
+              date: job.completedOn || job.createdOn,
+              summary: job.summary || 'Service call',
+              total: job.total
+            }));
+          }
+        }
+      } catch (err) {
+        console.log('[POST-CALL] Customer lookup failed:', err.message);
+      }
+    }
+    
+    // Build header
+    let headerEmoji, headerText, statusColor;
     
     if (bookingResult?.success) {
       headerEmoji = '✅';
-      headerText = 'Booked';
-      statusText = `Job #${bookingResult.job_id} | ${bookingResult.day} ${bookingResult.time_window} | ${bookingResult.campaign}`;
-      if (bookingResult.missing_data) {
-        headerEmoji = '⚠️';
-        statusText += ` | MISSING: ${bookingResult.missing_data.join(', ')}`;
-      }
+      headerText = `Booked - Job #${bookingResult.job_id}`;
+      statusColor = '#36a64f'; // green
     } else if (extracted?.should_book === false) {
-      headerEmoji = '🟡';
-      headerText = 'Not Booked';
-      statusText = 'Customer did not book';
+      headerEmoji = '📞';
+      headerText = 'Call Received';
+      statusColor = '#ffc107'; // yellow
     } else {
       headerEmoji = '🔴';
-      headerText = 'Error';
-      statusText = 'Booking failed';
+      headerText = 'Booking Failed';
+      statusColor = '#dc3545'; // red
     }
     
-    const callerID = call?.from_number || 'Unknown';
-    const trackingNum = call?.to_number || 'Unknown';
+    // Build info lines
+    const lines = [];
+    lines.push(`*Name:* ${customerName || 'Unknown'}${isExistingCustomer ? ' ⭐ Existing Customer' : ''}`);
+    lines.push(`*Phone:* ${callerPhone}`);
+    if (extracted?.customer_street) {
+      const address = [extracted.customer_street, extracted.customer_city, extracted.customer_zip].filter(Boolean).join(', ');
+      lines.push(`*Address:* ${address}`);
+    }
+    lines.push(`*Issue:* ${extracted?.issue_description || 'Not specified'}`);
+    if (bookingResult?.success) {
+      lines.push(`*Scheduled:* ${bookingResult.day} | ${bookingResult.time_window}`);
+    }
+    if (call?.recording_url) {
+      lines.push(`*Recording:* <${call.recording_url}|🔊 Listen>`);
+    }
     
     const blocks = [
       {
-        type: 'header',
-        text: { type: 'plain_text', text: `${headerEmoji} ${headerText}`, emoji: true }
+        type: 'section',
+        text: { type: 'mrkdwn', text: lines.join('\n') }
       },
       {
-        type: 'section',
-        fields: [
-          { type: 'mrkdwn', text: `*Caller:* ${callerID}` },
-          { type: 'mrkdwn', text: `*Tracking #:* ${trackingNum}` },
-          { type: 'mrkdwn', text: `*Duration:* ${durationStr}` },
-          { type: 'mrkdwn', text: `*Status:* ${statusText}` }
-        ]
-      },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `*Issue:* ${extracted?.issue_description || 'N/A'}` }
-      },
-      { type: 'divider' },
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: `\`\`\`${transcript.substring(0, 2500)}\`\`\`` }
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: `⏱️ Duration: ${durationStr}` }]
       }
     ];
+    
+    // Add recent jobs if existing customer
+    if (recentJobs.length > 0) {
+      const jobLines = recentJobs.slice(0, 3).map(job => {
+        const date = job.date ? new Date(job.date).toLocaleDateString() : '';
+        const total = job.total ? ` - $${job.total}` : '';
+        return `• #${job.number} (${date}): ${(job.summary || '').substring(0, 40)}${total}`;
+      }).join('\n');
+      blocks.push({ 
+        type: 'section', 
+        text: { type: 'mrkdwn', text: `*Recent Jobs:*\n${jobLines}` } 
+      });
+    }
+    
+    // Add transcript
+    if (transcript && transcript !== 'No transcript') {
+      const truncated = transcript.length > 2500 ? transcript.substring(0, 2500) + '...' : transcript;
+      blocks.push(
+        { type: 'divider' },
+        { type: 'section', text: { type: 'mrkdwn', text: `\`\`\`${truncated}\`\`\`` } }
+      );
+    }
     
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -576,7 +638,11 @@ async function postToSlack(call, extracted, bookingResult) {
       },
       body: JSON.stringify({
         channel: CONFIG.SLACK_TRANSCRIPT_CHANNEL,
-        blocks
+        text: `${headerEmoji} ${headerText} - ${customerName || callerPhone}`,
+        attachments: [{
+          color: statusColor,
+          blocks: blocks
+        }]
       })
     });
   } catch (error) {
@@ -640,6 +706,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 
 

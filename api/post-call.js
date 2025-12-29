@@ -15,6 +15,10 @@ const CONFIG = {
   JOB_TYPE_DRAIN: 79265910,
   CAMPAIGN_ID_FALLBACK: 313, // Sarah Voice AI - used when tracking number lookup fails
   
+  // Dispatch fee services
+  SERVICE_DISPATCH_79: 43942323,    // $79 Standard Service Call
+  SERVICE_DISPATCH_WAIVED: 79558845, // $0 Waived Dispatch Fee
+  
   ARRIVAL_WINDOWS: {
     morning: { startHour: 8, endHour: 11 },
     midday: { startHour: 11, endHour: 14 },
@@ -443,6 +447,41 @@ Other: `;
   
   console.log('[POST-CALL] Job created:', job.id);
   
+  // Add dispatch fee service to invoice based on what customer agreed to
+  try {
+    const dispatchFeeValue = extracted.dispatch_fee ? String(extracted.dispatch_fee).replace(/[^0-9]/g, '') : '79';
+    const isWaived = dispatchFeeValue === '0' || 
+                     (extracted.promises_made || '').toLowerCase().includes('waive') ||
+                     (extracted.dispatch_fee || '').toLowerCase().includes('waive');
+    
+    const serviceId = isWaived ? CONFIG.SERVICE_DISPATCH_WAIVED : CONFIG.SERVICE_DISPATCH_79;
+    const serviceName = isWaived ? '$0 Waived Dispatch Fee' : '$79 Standard Service Call';
+    const servicePrice = isWaived ? 0 : 79;
+    
+    console.log('[POST-CALL] Adding dispatch service:', serviceName, '(ID:', serviceId, ')');
+    
+    // Get the invoice for this job
+    const invoices = await stApi('GET', `/accounting/v2/tenant/${CONFIG.ST_TENANT_ID}/invoices?jobId=${job.id}`);
+    
+    if (invoices.data && invoices.data.length > 0) {
+      const invoiceId = invoices.data[0].id;
+      console.log('[POST-CALL] Found invoice:', invoiceId);
+      
+      // Add the dispatch service to the invoice
+      await stApi('PATCH', `/accounting/v2/tenant/${CONFIG.ST_TENANT_ID}/invoices/${invoiceId}/items`, {
+        skuId: serviceId,
+        quantity: 1,
+        unitPrice: servicePrice
+      });
+      
+      console.log('[POST-CALL] Added dispatch service to invoice');
+    } else {
+      console.log('[POST-CALL] No invoice found for job yet - dispatch service not added');
+    }
+  } catch (invoiceErr) {
+    console.log('[POST-CALL] Could not add dispatch service to invoice:', invoiceErr.message);
+  }
+  
   const missingData = [];
   if (!street) missingData.push('address');
   if (!city) missingData.push('city');
@@ -593,6 +632,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 
 

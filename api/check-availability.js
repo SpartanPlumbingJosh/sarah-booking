@@ -87,7 +87,7 @@ async function getCapacity(startDate, endDate) {
   const token = await getAccessToken();
   
   const response = await fetch(
-    `https://api.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
+    `https://api-integration.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
     {
       method: 'POST',
       headers: {

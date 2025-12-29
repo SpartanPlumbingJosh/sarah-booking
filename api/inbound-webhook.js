@@ -92,23 +92,35 @@ function formatDateStr(date) {
   return `${year}-${month}-${day}`;
 }
 
+// Get next N business days INCLUDING TODAY if there's still time
 function getNextBusinessDays(count) {
   const days = [];
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   
-  // FIX: Use Eastern time, not UTC
+  // Use Eastern time
   const easternNow = getEasternNow();
+  const currentHour = easternNow.getHours();
   
+  // Start from TODAY, not tomorrow
   let checkDate = new Date(easternNow);
-  checkDate.setDate(checkDate.getDate() + 1); // Start from tomorrow
   
   while (days.length < count) {
     const dayOfWeek = checkDate.getDay();
-    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Skip weekends
-      days.push({
-        dayName: dayNames[dayOfWeek],
-        dateStr: formatDateStr(checkDate)
-      });
+    
+    // Skip weekends
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      const isToday = formatDateStr(checkDate) === formatDateStr(easternNow);
+      
+      // For today, only include if it's before 5 PM (last window ends at 5)
+      // For future days, always include
+      if (!isToday || currentHour < 17) {
+        days.push({
+          dayName: isToday ? 'today' : dayNames[dayOfWeek],
+          dateStr: formatDateStr(checkDate),
+          isToday: isToday,
+          currentHour: isToday ? currentHour : null
+        });
+      }
     }
     checkDate.setDate(checkDate.getDate() + 1);
   }
@@ -121,6 +133,21 @@ function getWindowName(hour) {
   if (hour >= 11 && hour < 14) return 'midday';
   if (hour >= 14 && hour < 17) return 'afternoon';
   return null;
+}
+
+// Check if a window is still available today based on current hour
+function isWindowStillAvailable(windowName, currentHour) {
+  if (currentHour === null) return true; // Future day, all windows valid
+  
+  // Window start times
+  const windowStarts = {
+    'morning': 8,
+    'midday': 11,
+    'afternoon': 14
+  };
+  
+  // Only offer windows that haven't started yet (give 1 hour buffer)
+  return currentHour < windowStarts[windowName];
 }
 
 async function getAvailability() {
@@ -175,11 +202,18 @@ async function getAvailability() {
     for (const day of businessDays) {
       const windows = slotsByDate[day.dateStr];
       if (windows && windows.size > 0) {
-        available.push({
-          day: day.dayName,
-          date: day.dateStr,
-          windows: Array.from(windows)
-        });
+        // Filter out windows that have passed (for today only)
+        const validWindows = Array.from(windows).filter(w => 
+          isWindowStillAvailable(w, day.currentHour)
+        );
+        
+        if (validWindows.length > 0) {
+          available.push({
+            day: day.dayName,
+            date: day.dateStr,
+            windows: validWindows
+          });
+        }
       }
     }
     
@@ -232,7 +266,7 @@ module.exports = async (req, res) => {
       getAvailability()
     ]);
     
-    // FIX: Add today_date so Sarah knows what day it is
+    // Add today_date so Sarah knows what day it is
     const easternNow = getEasternNow();
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 

@@ -56,7 +56,7 @@ async function stApi(method, endpoint, body = null) {
   };
   if (body) options.body = JSON.stringify(body);
   
-  const response = await fetch(`https://api.servicetitan.io${endpoint}`, options);
+  const response = await fetch(`https://api-integration.servicetitan.io${endpoint}`, options);
   const responseText = await response.text();
   
   if (!response.ok) {

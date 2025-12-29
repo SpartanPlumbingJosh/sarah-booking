@@ -15,7 +15,7 @@ async function getAccessToken() {
     return cachedToken;
   }
   
-  const response = await fetch('https://auth.servicetitan.io/connect/token', {
+  const response = await fetch('https://auth-integration.servicetitan.io/connect/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

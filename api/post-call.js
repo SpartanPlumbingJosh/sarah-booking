@@ -384,6 +384,12 @@ Tried To Contact:
 Other: `;
   
   console.log('[POST-CALL] Using campaign:', campaignId, campaignName);
+  console.log('[POST-CALL] Customer ID:', customerId, '| Location ID:', locationId);
+  console.log('[POST-CALL] Address:', street, city, state, zip);
+  
+  if (!customerId || !locationId) {
+    throw new Error(`Missing required IDs - customerId: ${customerId}, locationId: ${locationId}`);
+  }
   
   // Build job payload
   const jobPayload = {

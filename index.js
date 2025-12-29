@@ -10,6 +10,7 @@ const bookAppointment = require('./api/book-appointment');
 const postCall = require('./api/post-call');
 const inboundWebhook = require('./api/inbound-webhook');
 const health = require('./api/health');
+const stConfig = require('./api/st-config');
 
 // Wrap Vercel handlers for Express
 const wrap = (handler) => async (req, res) => {
@@ -29,6 +30,7 @@ app.all('/api/post-call', wrap(postCall));
 app.all('/api/inbound-webhook', wrap(inboundWebhook));
 app.all('/api/health', wrap(health));
 app.get('/health', wrap(health));
+app.all('/api/st-config', wrap(stConfig));
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'sarah-booking' }));
 
 const PORT = process.env.PORT || 3000;

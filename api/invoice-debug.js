@@ -65,17 +65,21 @@ module.exports = async (req, res) => {
     if (invoices.data && invoices.data.data && invoices.data.data.length > 0) {
       const invoiceId = invoices.data.data[0].id;
       
-      // Try PATCH to add item
+      // Try PATCH with all required fields
       addResult = await stApi('PATCH', `/accounting/v2/tenant/${CONFIG.ST_TENANT_ID}/invoices/${invoiceId}/items`, {
-        skuId: 43942323, // $79 Standard Service Call
+        skuId: 43942323,
+        skuName: '$79 Standard Service Call',
+        description: 'Includes travel and on-site labor for diagnosing and addressing minor plumbing issues.',
         quantity: 1,
-        unitPrice: 79
+        unitPrice: 79,
+        cost: 0,
+        isAddOn: false
       });
     }
     
     return res.json({
       jobId,
-      invoicesResponse: invoices,
+      invoiceId: invoices.data?.data?.[0]?.id,
       addItemResult: addResult
     });
   } catch (error) {

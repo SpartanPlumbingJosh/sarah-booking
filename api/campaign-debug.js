@@ -34,9 +34,9 @@ module.exports = async (req, res) => {
     const token = await getAccessToken();
     const phone = req.query.phone || '9378843414';
     
-    // Get all campaigns
+    // Get ALL campaigns with their phone numbers
     const allResponse = await fetch(
-      `https://api.servicetitan.io/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?pageSize=100`,
+      `https://api.servicetitan.io/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?pageSize=200&active=Any`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -46,38 +46,54 @@ module.exports = async (req, res) => {
     );
     const allData = await allResponse.json();
     
-    // Find campaigns with phone numbers
-    const withPhones = (allData.data || []).filter(c => 
-      c.phoneNumber || c.trackingPhoneNumber || c.number
-    ).map(c => ({
-      id: c.id,
-      name: c.name,
-      phoneNumber: c.phoneNumber,
-      trackingPhoneNumber: c.trackingPhoneNumber,
-      number: c.number,
-      allKeys: Object.keys(c)
-    }));
+    // Extract campaigns with phone numbers
+    const campaignsWithPhones = (allData.data || [])
+      .filter(c => c.campaignPhoneNumbers && c.campaignPhoneNumbers.length > 0)
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        active: c.active,
+        phoneNumbers: c.campaignPhoneNumbers
+      }));
     
-    // Try the specific search
-    const searchResponse = await fetch(
-      `https://api.servicetitan.io/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?campaignPhoneNumber=${phone}&pageSize=5`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'ST-App-Key': CONFIG.ST_APP_KEY
-        }
-      }
+    // Try to find campaign matching our phone
+    const phoneDigits = phone.replace(/\D/g, '');
+    const matchingCampaign = campaignsWithPhones.find(c => 
+      c.phoneNumbers.some(p => p.replace(/\D/g, '').includes(phoneDigits) || phoneDigits.includes(p.replace(/\D/g, '')))
     );
-    const searchData = await searchResponse.json();
+    
+    // Try API search with different formats
+    const formats = [
+      phone,
+      phoneDigits,
+      `+1${phoneDigits}`,
+      phoneDigits.slice(-10)
+    ];
+    
+    const searchResults = {};
+    for (const fmt of formats) {
+      const searchResponse = await fetch(
+        `https://api.servicetitan.io/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?campaignPhoneNumber=${encodeURIComponent(fmt)}&pageSize=5`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'ST-App-Key': CONFIG.ST_APP_KEY
+          }
+        }
+      );
+      const searchData = await searchResponse.json();
+      searchResults[fmt] = searchData.data?.length || 0;
+    }
     
     return res.json({
+      searchPhone: phone,
+      phoneDigits: phoneDigits,
       totalCampaigns: allData.data?.length || 0,
-      campaignsWithPhones: withPhones,
-      searchFor: phone,
-      searchResults: searchData.data || [],
-      sampleCampaign: allData.data?.[0] || null
+      campaignsWithPhones: campaignsWithPhones,
+      matchingCampaign: matchingCampaign || null,
+      apiSearchResults: searchResults
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message, stack: error.stack });
   }
 };

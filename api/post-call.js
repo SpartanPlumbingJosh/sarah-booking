@@ -364,16 +364,18 @@ async function createBooking(parsed, callerPhone, trackingNumber) {
   const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
   const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
   
-  // Build detailed job summary
-  const summaryParts = [
-    issue,
-    `\nCaller: ${customerName}`,
-    `Expected Arrival: ${arrivalDay} ${arrivalTime}`,
-    `Dispatch Fee: $${parsed.dispatch_fee || '79'}`,
-    `Updates Via: ${parsed.notification_preference || 'text'}`,
-  ];
-  if (parsed.promises_made) summaryParts.push(`Promises: ${parsed.promises_made}`);
-  const jobSummary = summaryParts.join('\n');
+  // Build job summary in ServiceTitan's exact field format
+  const dispatchFee = parsed.dispatch_fee ? `$${parsed.dispatch_fee}` : '$79';
+  const promisesMade = parsed.promises_made || '';
+  const updatesVia = parsed.notification_preference || 'text';
+  
+  const jobSummary = `Job Description: ${issue}
+Expected Arrival Time: ${arrivalTime}
+Dispatch Fee Quoted: ${dispatchFee}
+Promises Made: ${promisesMade}
+Updates Via Text or Call: ${updatesVia}
+Tried To Contact: 
+Other: `;
   
   console.log('[POST-CALL] Using campaign:', campaignId, campaignName);
   

@@ -92,18 +92,28 @@ async function getCampaignFromCallRecord(callerPhone) {
     console.log('[POST-CALL] Looking up call record for caller:', phone);
     
     // Query ServiceTitan's telecom API for recent calls from this number
-    // Sort by -CreatedOn to get most recent first
-    const result = await stApi('GET', `/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=1`);
+    // Get last 5 calls, inbound only, sorted by most recent
+    const result = await stApi('GET', `/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=5`);
+    
+    console.log('[POST-CALL] Found', (result.data || []).length, 'call records');
     
     if (result.data && result.data.length > 0) {
-      const call = result.data[0];
-      if (call.campaign && call.campaign.id) {
-        console.log('[POST-CALL] Found campaign from call record:', call.campaign.id, call.campaign.name);
-        return { id: call.campaign.id, name: call.campaign.name };
+      // Log all calls found for debugging
+      for (const c of result.data) {
+        console.log('[POST-CALL] Call ID:', c.id, '| Created:', c.createdOn, '| Campaign:', c.campaign?.id, c.campaign?.name || 'NONE');
       }
-      console.log('[POST-CALL] Call record found but no campaign attached');
+      
+      // Find the first call with a campaign
+      const callWithCampaign = result.data.find(c => c.campaign && c.campaign.id);
+      
+      if (callWithCampaign) {
+        console.log('[POST-CALL] Using campaign from call', callWithCampaign.id, ':', callWithCampaign.campaign.id, callWithCampaign.campaign.name);
+        return { id: callWithCampaign.campaign.id, name: callWithCampaign.campaign.name };
+      }
+      
+      console.log('[POST-CALL] No calls found with campaign attached');
     } else {
-      console.log('[POST-CALL] No call record found for:', phone);
+      console.log('[POST-CALL] No call records found for:', phone);
     }
   } catch (error) {
     console.error('[POST-CALL] Call record lookup failed:', error.message);
@@ -507,6 +517,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 
 

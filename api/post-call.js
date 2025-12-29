@@ -468,10 +468,18 @@ Other: `;
       console.log('[POST-CALL] Found invoice:', invoiceId);
       
       // Add the dispatch service to the invoice
+      const serviceDescription = isWaived 
+        ? 'Dispatch fee waived' 
+        : 'Includes travel and on-site labor for diagnosing and addressing minor plumbing issues.';
+      
       await stApi('PATCH', `/accounting/v2/tenant/${CONFIG.ST_TENANT_ID}/invoices/${invoiceId}/items`, {
         skuId: serviceId,
+        skuName: serviceName,
+        description: serviceDescription,
         quantity: 1,
-        unitPrice: servicePrice
+        unitPrice: servicePrice,
+        cost: 0,
+        isAddOn: false
       });
       
       console.log('[POST-CALL] Added dispatch service to invoice');

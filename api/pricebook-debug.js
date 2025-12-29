@@ -34,58 +34,46 @@ module.exports = async (req, res) => {
     const token = await getAccessToken();
     const search = (req.query.search || '').toLowerCase();
     
-    // Get ALL services (paginate if needed)
-    let allServices = [];
-    let page = 1;
-    let hasMore = true;
-    
-    while (hasMore && page <= 10) {
-      const response = await fetch(
-        `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=Any&pageSize=200&page=${page}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'ST-App-Key': CONFIG.ST_APP_KEY
-          }
+    // Get services with dispatch fee checkbox checked
+    const response = await fetch(
+      `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=Any&pageSize=200`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'ST-App-Key': CONFIG.ST_APP_KEY
         }
-      );
-      
-      const data = await response.json();
-      
-      if (data.data && data.data.length > 0) {
-        allServices = allServices.concat(data.data);
-        hasMore = data.hasMore;
-        page++;
-      } else {
-        hasMore = false;
       }
-    }
+    );
     
-    // Filter if search provided
-    let services = allServices;
-    if (search) {
-      services = allServices.filter(s => 
-        (s.name || '').toLowerCase().includes(search) || 
-        (s.code || '').toLowerCase().includes(search)
-      );
-    }
+    const data = await response.json();
     
-    // Map to simple format
-    const result = services.map(s => ({
-      id: s.id,
-      code: s.code,
-      name: s.name,
-      price: s.price,
-      active: s.active
-    }));
+    // Return first few raw services to see structure
+    const rawSample = (data.data || []).slice(0, 3);
+    
+    // Filter for dispatch-related
+    const dispatchServices = (data.data || []).filter(s => 
+      s.isDispatchFee === true ||
+      (s.code && s.code.toLowerCase().includes('dispatch')) ||
+      (s.name && s.name.toLowerCase().includes('dispatch')) ||
+      (s.code && s.code.includes('$0')) ||
+      (s.code && s.code.includes('$79'))
+    );
     
     return res.json({
-      search: search || '(all)',
-      totalInPricebook: allServices.length,
-      matchingServices: result.length,
-      services: result.slice(0, 50)
+      totalReturned: (data.data || []).length,
+      hasMore: data.hasMore,
+      rawSampleKeys: rawSample.length > 0 ? Object.keys(rawSample[0]) : [],
+      rawSample: rawSample,
+      dispatchServices: dispatchServices.map(s => ({
+        id: s.id,
+        code: s.code,
+        name: s.name,
+        price: s.price,
+        active: s.active,
+        isDispatchFee: s.isDispatchFee
+      }))
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message, stack: error.stack });
+    return res.status(500).json({ error: error.message });
   }
 };

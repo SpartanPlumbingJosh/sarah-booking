@@ -110,10 +110,13 @@ ${transcript}
   "city": "city THEY SAID on the call or null",
   "state": "state or OH",
   "zip": "zip code THEY SAID on the call or null",
-  "issue": "plumbing problem description",
+  "issue": "brief plumbing problem description",
   "day": "day of week or null",
   "time_window": "morning/midday/afternoon or null",
-  "is_new_customer": true if they said they've never used the service before
+  "is_new_customer": true if they said they've never used the service before,
+  "dispatch_fee": "79 if standard dispatch, 0 if economy/no-cost option, or null",
+  "notification_preference": "text or call - how they want to be notified",
+  "promises_made": "any specific promises the agent made or null"
 }
 
 IMPORTANT: Extract the address the customer SAID on the call, not any address the agent might have mentioned from their records.
@@ -215,11 +218,16 @@ async function alreadyBooked(customerId, appointmentDate) {
   }
 }
 
-// ALWAYS use the address from the call - NEVER override with ST data
+// Use CALLER ID for customer lookup, spoken phone for contact info
 async function createBooking(parsed, callerPhone) {
-  const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
-  const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') 
-    ? cleanPhone.slice(1) : cleanPhone;
+  // Caller ID for existing customer lookup
+  const callerDigits = callerPhone ? callerPhone.replace(/\D/g, '') : '';
+  const lookupPhone = callerDigits.length === 11 && callerDigits.startsWith('1') 
+    ? callerDigits.slice(1) : callerDigits;
+  
+  // Spoken phone for contact (fallback to caller ID)
+  const spokenPhone = parsed.phone ? parsed.phone.replace(/\D/g, '') : '';
+  const contactPhone = spokenPhone || lookupPhone;
   
   // ALWAYS use what they said on the call
   let street = parsed.street;
@@ -241,7 +249,7 @@ async function createBooking(parsed, callerPhone) {
   let locationId = null;
   
   // Check for existing customer by phone
-  const existingCustomer = await findCustomerByPhone(normalizedPhone);
+  const existingCustomer = await findCustomerByPhone(lookupPhone);
   if (existingCustomer) {
     customerId = existingCustomer.id;
     console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
@@ -283,11 +291,11 @@ async function createBooking(parsed, callerPhone) {
       name: customerName,
       type: 'Residential',
       address: { street, city, state, zip, country: 'USA' },
-      contacts: [{ type: 'MobilePhone', value: normalizedPhone }],
+      contacts: [{ type: 'MobilePhone', value: contactPhone }],
       locations: [{
         name: customerName,
         address: { street, city, state, zip, country: 'USA' },
-        contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
+        contacts: [{ type: 'MobilePhone', value: contactPhone }]
       }]
     });
     customerId = customerResult.id;
@@ -301,7 +309,7 @@ async function createBooking(parsed, callerPhone) {
       customerId,
       name: customerName,
       address: { street, city, state, zip, country: 'USA' },
-      contacts: [{ type: 'MobilePhone', value: normalizedPhone }]
+      contacts: [{ type: 'MobilePhone', value: contactPhone }]
     });
     locationId = newLoc.id;
   }
@@ -316,6 +324,20 @@ async function createBooking(parsed, callerPhone) {
   const isDrain = /drain|sewer|clog|backup|snake/i.test(issue);
   
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const arrivalDay = dayNames[apptDate.dayOfWeek];
+  const windowTimes = { morning: '8-11am', midday: '11am-2pm', afternoon: '2-5pm' };
+  const arrivalTime = windowTimes[timeWindow] || timeWindow;
+  
+  // Build detailed job summary
+  const summaryParts = [
+    issue,
+    `\nCaller: ${customerName}`,
+    `Expected Arrival: ${arrivalDay} ${arrivalTime}`,
+    `Dispatch Fee: $${parsed.dispatch_fee || '79'}`,
+    `Updates Via: ${parsed.notification_preference || 'text'}`,
+  ];
+  if (parsed.promises_made) summaryParts.push(`Promises: ${parsed.promises_made}`);
+  const jobSummary = summaryParts.join('\n');
   
   const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
     customerId,
@@ -323,7 +345,7 @@ async function createBooking(parsed, callerPhone) {
     businessUnitId: isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING,
     jobTypeId: isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE,
     priority: 'Normal',
-    summary: issue,
+    summary: jobSummary,
     campaignId: CONFIG.CAMPAIGN_ID,
     appointments: [{
       start: startUTC,
@@ -463,9 +485,10 @@ module.exports = async (req, res) => {
       console.log('[POST-CALL] should_book=true, checking for duplicates...');
       
       // Check if already booked (prevents double booking from webhook retries)
-      const cleanPhone = String(parsed.phone || callerPhone || '').replace(/\D/g, '');
-      const normalizedPhone = cleanPhone.length === 11 && cleanPhone.startsWith('1') ? cleanPhone.slice(1) : cleanPhone;
-      const existingCustomer = await findCustomerByPhone(normalizedPhone);
+      // Use CALLER ID for lookup (same as createBooking)
+      const callerDigits = callerPhone ? callerPhone.replace(/\D/g, '') : '';
+      const lookupPhone = callerDigits.length === 11 && callerDigits.startsWith('1') ? callerDigits.slice(1) : callerDigits;
+      const existingCustomer = await findCustomerByPhone(lookupPhone);
       
       if (existingCustomer && await alreadyBooked(existingCustomer.id)) {
         console.log('[POST-CALL] DUPLICATE DETECTED - skipping booking');

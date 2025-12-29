@@ -42,7 +42,6 @@ async function lookupCustomer(phone) {
   
   try {
     const token = await getAccessToken();
-    // Use 'phone' parameter per ST API spec
     const response = await fetch(
       `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=5`,
       {
@@ -79,18 +78,36 @@ async function lookupCustomer(phone) {
   }
 }
 
+// Get current time in Eastern timezone
+function getEasternNow() {
+  const now = new Date();
+  return new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+}
+
+// Format date as YYYY-MM-DD in Eastern time (avoids toISOString UTC conversion)
+function formatDateStr(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function getNextBusinessDays(count) {
   const days = [];
-  const today = new Date();
-  let checkDate = new Date(today);
-  checkDate.setDate(checkDate.getDate() + 1);
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  
+  // FIX: Use Eastern time, not UTC
+  const easternNow = getEasternNow();
+  
+  let checkDate = new Date(easternNow);
+  checkDate.setDate(checkDate.getDate() + 1); // Start from tomorrow
   
   while (days.length < count) {
     const dayOfWeek = checkDate.getDay();
-    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Skip weekends
       days.push({
-        dayName: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek],
-        dateStr: checkDate.toISOString().split('T')[0]
+        dayName: dayNames[dayOfWeek],
+        dateStr: formatDateStr(checkDate)
       });
     }
     checkDate.setDate(checkDate.getDate() + 1);
@@ -215,9 +232,21 @@ module.exports = async (req, res) => {
       getAvailability()
     ]);
     
+    // FIX: Add today_date so Sarah knows what day it is
+    const easternNow = getEasternNow();
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                        'July', 'August', 'September', 'October', 'November', 'December'];
+    
+    const todayDayName = dayNames[easternNow.getDay()];
+    const todayMonth = monthNames[easternNow.getMonth()];
+    const todayDate = easternNow.getDate();
+    
     const dynamicVars = {
       ...(customerData || { is_existing_customer: 'false' }),
-      ...availabilityData
+      ...availabilityData,
+      // Sarah's script expects {{today_date}}
+      today_date: `${todayDayName}, ${todayMonth} ${todayDate}`
     };
     
     console.log('[INBOUND] Dynamic vars:', JSON.stringify(dynamicVars));

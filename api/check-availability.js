@@ -20,7 +20,7 @@ async function getAccessToken() {
   console.log('[AVAILABILITY] Client ID:', CONFIG.ST_CLIENT_ID ? 'present' : 'MISSING');
   console.log('[AVAILABILITY] Client Secret:', CONFIG.ST_CLIENT_SECRET ? 'present' : 'MISSING');
   
-  const response = await fetch('https://auth-integration.servicetitan.io/connect/token', {
+  const response = await fetch('https://auth.servicetitan.io/connect/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -104,7 +104,7 @@ async function getCapacity(startDate, endDate) {
   console.log('[AVAILABILITY] Calling capacity API for', startDate, 'to', endDate);
   
   const response = await fetch(
-    `https://api-integration.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
+    `https://api.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
     {
       method: 'POST',
       headers: {
@@ -245,5 +245,6 @@ module.exports = async (req, res) => {
     });
   }
 };
+
 
 

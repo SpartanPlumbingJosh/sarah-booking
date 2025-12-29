@@ -15,7 +15,7 @@ async function getAccessToken() {
     return cachedToken;
   }
   
-  const response = await fetch('https://auth-integration.servicetitan.io/connect/token', {
+  const response = await fetch('https://auth.servicetitan.io/connect/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -43,7 +43,7 @@ async function lookupCustomer(phone) {
   try {
     const token = await getAccessToken();
     const response = await fetch(
-      `https://api-integration.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=5`,
+      `https://api.servicetitan.io/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers?phone=${normalizedPhone}&pageSize=5`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -163,7 +163,7 @@ async function getAvailability() {
     const endDate = businessDays[businessDays.length - 1].dateStr;
     
     const response = await fetch(
-      `https://api-integration.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
+      `https://api.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
       {
         method: 'POST',
         headers: {
@@ -296,3 +296,4 @@ module.exports = async (req, res) => {
     return res.status(200).json({});
   }
 };
+

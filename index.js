@@ -16,6 +16,7 @@ const capacityMonday = require('./api/capacity-monday');
 const campaignDebug = require('./api/campaign-debug');
 const telecomDebug = require('./api/telecom-debug');
 const pricebookDebug = require('./api/pricebook-debug');
+const invoiceDebug = require('./api/invoice-debug');
 
 // Wrap Vercel handlers for Express
 const wrap = (handler) => async (req, res) => {
@@ -41,10 +42,12 @@ app.all('/api/capacity-monday', wrap(capacityMonday));
 app.all('/api/campaign-debug', wrap(campaignDebug));
 app.all('/api/telecom-debug', wrap(telecomDebug));
 app.all('/api/pricebook-debug', wrap(pricebookDebug));
+app.all('/api/invoice-debug', wrap(invoiceDebug));
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'sarah-booking' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Running on port ${PORT}`));
+
 
 
 

@@ -31,20 +31,38 @@ async function getAccessToken() {
   return cachedToken;
 }
 
-// Get next N business days
+// Get current time in Eastern timezone
+function getEasternNow() {
+  const now = new Date();
+  return new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+}
+
+// Format date as YYYY-MM-DD in Eastern time (avoids toISOString UTC conversion)
+function formatDateStr(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Get next N business days starting from tomorrow (Eastern time)
 function getNextBusinessDays(count) {
   const days = [];
-  const today = new Date();
-  let checkDate = new Date(today);
-  checkDate.setDate(checkDate.getDate() + 1);
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  
+  // FIX: Use Eastern time, not UTC
+  const easternNow = getEasternNow();
+  
+  let checkDate = new Date(easternNow);
+  checkDate.setDate(checkDate.getDate() + 1); // Start from tomorrow
   
   while (days.length < count) {
     const dayOfWeek = checkDate.getDay();
-    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) { // Skip weekends
       days.push({
         date: new Date(checkDate),
-        dayName: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek],
-        dateStr: checkDate.toISOString().split('T')[0]
+        dayName: dayNames[dayOfWeek],
+        dateStr: formatDateStr(checkDate)
       });
     }
     checkDate.setDate(checkDate.getDate() + 1);

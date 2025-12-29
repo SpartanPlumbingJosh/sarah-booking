@@ -32,45 +32,51 @@ async function getAccessToken() {
 module.exports = async (req, res) => {
   try {
     const token = await getAccessToken();
-    const search = (req.query.search || '').toLowerCase();
     
-    // Get services with dispatch fee checkbox checked
-    const response = await fetch(
-      `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=Any&pageSize=200`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'ST-App-Key': CONFIG.ST_APP_KEY
+    // Paginate through ALL services
+    let allServices = [];
+    let page = 1;
+    let hasMore = true;
+    
+    while (hasMore && page <= 20) {
+      const response = await fetch(
+        `https://api.servicetitan.io/pricebook/v2/tenant/${CONFIG.ST_TENANT_ID}/services?active=Any&pageSize=200&page=${page}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'ST-App-Key': CONFIG.ST_APP_KEY
+          }
         }
+      );
+      
+      const data = await response.json();
+      if (data.data && data.data.length > 0) {
+        allServices = allServices.concat(data.data);
+        hasMore = data.hasMore;
+        page++;
+      } else {
+        hasMore = false;
       }
-    );
+    }
     
-    const data = await response.json();
-    
-    // Return first few raw services to see structure
-    const rawSample = (data.data || []).slice(0, 3);
-    
-    // Filter for dispatch-related
-    const dispatchServices = (data.data || []).filter(s => 
-      s.isDispatchFee === true ||
-      (s.code && s.code.toLowerCase().includes('dispatch')) ||
-      (s.name && s.name.toLowerCase().includes('dispatch')) ||
-      (s.code && s.code.includes('$0')) ||
-      (s.code && s.code.includes('$79'))
-    );
+    // Find dispatch services (code starting with $ or displayName containing dispatch)
+    const dispatchServices = allServices.filter(s => {
+      const code = (s.code || '').toLowerCase();
+      const name = (s.displayName || '').toLowerCase();
+      return code.startsWith('$') || 
+             name.includes('dispatch') || 
+             name.includes('service call') ||
+             code.includes('dispatch');
+    });
     
     return res.json({
-      totalReturned: (data.data || []).length,
-      hasMore: data.hasMore,
-      rawSampleKeys: rawSample.length > 0 ? Object.keys(rawSample[0]) : [],
-      rawSample: rawSample,
+      totalServices: allServices.length,
       dispatchServices: dispatchServices.map(s => ({
         id: s.id,
         code: s.code,
-        name: s.name,
+        displayName: s.displayName,
         price: s.price,
-        active: s.active,
-        isDispatchFee: s.isDispatchFee
+        active: s.active
       }))
     });
   } catch (error) {

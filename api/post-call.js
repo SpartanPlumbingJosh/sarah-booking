@@ -13,7 +13,7 @@ const CONFIG = {
   BUSINESS_UNIT_DRAIN: 44665438,
   JOB_TYPE_SERVICE: 79273907,
   JOB_TYPE_DRAIN: 79265910,
-  // No hardcoded fallback - campaign comes from tracking number lookup only
+  CAMPAIGN_ID_FALLBACK: 313, // Sarah Voice AI - used when tracking number lookup fails
   
   ARRIVAL_WINDOWS: {
     morning: { startHour: 8, endHour: 11 },
@@ -310,8 +310,8 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   
   // Look up campaign from tracking number
   const campaign = await getCampaignByPhone(trackingNumber);
-  const campaignId = campaign ? campaign.id : null;
-  const campaignName = campaign ? campaign.name : 'Unknown';
+  const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
+  const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
   
   // Build job summary in ServiceTitan's exact field format
   const dispatchFee = extracted.dispatch_fee ? `$${extracted.dispatch_fee}` : '$79';
@@ -344,10 +344,9 @@ Other: `;
     }]
   };
   
-  // Only add campaignId if we have one from tracking number lookup
-  if (campaignId) {
+  
+  // Always include campaignId (uses fallback if tracking lookup fails)
     jobPayload.campaignId = campaignId;
-  }
   
   const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, jobPayload);
   
@@ -503,4 +502,5 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 

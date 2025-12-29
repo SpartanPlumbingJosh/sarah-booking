@@ -79,29 +79,34 @@ async function findCustomerByPhone(phone) {
   return null;
 }
 
-// Look up campaign by tracking phone number for marketing attribution
-async function getCampaignByPhone(trackingNumber) {
-  if (!trackingNumber) return null;
+// Look up campaign from ServiceTitan call record using caller's phone number
+async function getCampaignFromCallRecord(callerPhone) {
+  if (!callerPhone) return null;
   
   try {
-    let phone = trackingNumber.replace(/\D/g, '');
+    let phone = callerPhone.replace(/\D/g, '');
     if (phone.length === 11 && phone.startsWith('1')) {
       phone = phone.slice(1);
     }
     
-    console.log('[POST-CALL] Looking up campaign for tracking number:', phone);
+    console.log('[POST-CALL] Looking up call record for caller:', phone);
     
-    const result = await stApi('GET', `/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?campaignPhoneNumber=${phone}&pageSize=5`);
+    // Query ServiceTitan's telecom API for recent calls from this number
+    // Sort by -CreatedOn to get most recent first
+    const result = await stApi('GET', `/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=1`);
     
     if (result.data && result.data.length > 0) {
-      const campaign = result.data[0];
-      console.log('[POST-CALL] Found campaign:', campaign.id, campaign.name);
-      return { id: campaign.id, name: campaign.name };
+      const call = result.data[0];
+      if (call.campaign && call.campaign.id) {
+        console.log('[POST-CALL] Found campaign from call record:', call.campaign.id, call.campaign.name);
+        return { id: call.campaign.id, name: call.campaign.name };
+      }
+      console.log('[POST-CALL] Call record found but no campaign attached');
+    } else {
+      console.log('[POST-CALL] No call record found for:', phone);
     }
-    
-    console.log('[POST-CALL] No campaign found for tracking number:', phone);
   } catch (error) {
-    console.error('[POST-CALL] Campaign lookup failed:', error.message);
+    console.error('[POST-CALL] Call record lookup failed:', error.message);
   }
   return null;
 }
@@ -309,7 +314,7 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   const arrivalTime = windowTimes[timeWindow] || timeWindow;
   
   // Look up campaign from tracking number
-  const campaign = await getCampaignByPhone(trackingNumber);
+  const campaign = await getCampaignFromCallRecord(callerPhone);
   const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
   const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
   
@@ -502,5 +507,6 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 

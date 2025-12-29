@@ -373,7 +373,6 @@ async function createBooking(parsed, callerPhone, trackingNumber) {
     `Updates Via: ${parsed.notification_preference || 'text'}`,
   ];
   if (parsed.promises_made) summaryParts.push(`Promises: ${parsed.promises_made}`);
-  if (trackingNumber) summaryParts.push(`Tracking #: ${trackingNumber}`);
   const jobSummary = summaryParts.join('\n');
   
   console.log('[POST-CALL] Using campaign:', campaignId, campaignName);

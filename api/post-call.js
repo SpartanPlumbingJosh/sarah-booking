@@ -91,29 +91,39 @@ async function getCampaignFromCallRecord(callerPhone) {
     
     console.log('[POST-CALL] Looking up call record for caller:', phone);
     
-    // Query ServiceTitan's telecom API for recent calls from this number
-    // Get last 5 calls, inbound only, sorted by most recent
-    const result = await stApi('GET', `/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=5`);
+    // Use the export API - it returns campaign data unlike the regular calls endpoint
+    // Get calls from today with recent changes included
+    const today = new Date().toISOString().split('T')[0];
+    const result = await stApi('GET', `/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/export/calls?from=${today}&includeRecentChanges=true`);
     
-    console.log('[POST-CALL] Found', (result.data || []).length, 'call records');
+    // Filter to find calls from this phone number
+    const callsFromCaller = (result.data || []).filter(c => {
+      const callFrom = (c.from || '').replace(/\D/g, '');
+      return callFrom === phone || callFrom.endsWith(phone) || phone.endsWith(callFrom);
+    });
     
-    if (result.data && result.data.length > 0) {
-      // Log all calls found for debugging
-      for (const c of result.data) {
-        console.log('[POST-CALL] Call ID:', c.id, '| Created:', c.createdOn, '| Campaign:', c.campaign?.id, c.campaign?.name || 'NONE');
+    console.log('[POST-CALL] Found', callsFromCaller.length, 'calls from', phone, 'today');
+    
+    if (callsFromCaller.length > 0) {
+      // Sort by createdOn descending to get most recent
+      callsFromCaller.sort((a, b) => new Date(b.createdOn) - new Date(a.createdOn));
+      
+      // Log calls for debugging
+      for (const c of callsFromCaller.slice(0, 3)) {
+        console.log('[POST-CALL] Call ID:', c.id, '| Created:', c.createdOn, '| To:', c.to, '| Campaign:', c.campaign?.id, c.campaign?.name || 'NONE');
       }
       
-      // Find the first call with a campaign
-      const callWithCampaign = result.data.find(c => c.campaign && c.campaign.id);
+      // Find the most recent call with a campaign
+      const callWithCampaign = callsFromCaller.find(c => c.campaign && c.campaign.id);
       
       if (callWithCampaign) {
-        console.log('[POST-CALL] Using campaign from call', callWithCampaign.id, ':', callWithCampaign.campaign.id, callWithCampaign.campaign.name);
+        console.log('[POST-CALL] Using campaign:', callWithCampaign.campaign.id, callWithCampaign.campaign.name);
         return { id: callWithCampaign.campaign.id, name: callWithCampaign.campaign.name };
       }
       
       console.log('[POST-CALL] No calls found with campaign attached');
     } else {
-      console.log('[POST-CALL] No call records found for:', phone);
+      console.log('[POST-CALL] No call records found for:', phone, 'today');
     }
   } catch (error) {
     console.error('[POST-CALL] Call record lookup failed:', error.message);
@@ -517,6 +527,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+
 
 
 

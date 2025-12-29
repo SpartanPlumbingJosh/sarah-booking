@@ -13,7 +13,7 @@ const CONFIG = {
   BUSINESS_UNIT_DRAIN: 40472669,
   JOB_TYPE_SERVICE: 40464992,
   JOB_TYPE_DRAIN: 79265910,
-  CAMPAIGN_ID: 313,
+  CAMPAIGN_ID_FALLBACK: 313, // Sarah Voice AI - fallback if tracking number lookup fails
   
   ARRIVAL_WINDOWS: {
     morning: { startHour: 8, endHour: 11 },
@@ -75,6 +75,37 @@ async function findCustomerByPhone(phone) {
     }
   } catch (error) {
     console.error('[POST-CALL] Customer lookup failed:', error.message);
+  }
+  return null;
+}
+
+// Look up campaign by tracking phone number for marketing attribution
+async function getCampaignByPhone(trackingNumber) {
+  if (!trackingNumber) return null;
+  
+  try {
+    // Strip to just digits and remove leading 1 if present
+    let phone = trackingNumber.replace(/\D/g, '');
+    if (phone.length === 11 && phone.startsWith('1')) {
+      phone = phone.slice(1);
+    }
+    
+    console.log('[POST-CALL] Looking up campaign for tracking number:', phone);
+    
+    const result = await stApi('GET', `/marketing/v2/tenant/${CONFIG.ST_TENANT_ID}/campaigns?campaignPhoneNumber=${phone}&pageSize=5`);
+    
+    if (result.data && result.data.length > 0) {
+      const campaign = result.data[0];
+      console.log('[POST-CALL] Found campaign:', campaign.id, campaign.name);
+      return {
+        id: campaign.id,
+        name: campaign.name
+      };
+    }
+    
+    console.log('[POST-CALL] No campaign found for tracking number:', phone);
+  } catch (error) {
+    console.error('[POST-CALL] Campaign lookup failed:', error.message);
   }
   return null;
 }
@@ -219,7 +250,7 @@ async function alreadyBooked(customerId, appointmentDate) {
 }
 
 // Use CALLER ID for customer lookup, spoken phone for contact info
-async function createBooking(parsed, callerPhone) {
+async function createBooking(parsed, callerPhone, trackingNumber) {
   // Caller ID for existing customer lookup
   const callerDigits = callerPhone ? callerPhone.replace(/\D/g, '') : '';
   const lookupPhone = callerDigits.length === 11 && callerDigits.startsWith('1') 
@@ -328,6 +359,11 @@ async function createBooking(parsed, callerPhone) {
   const windowTimes = { morning: '8-11am', midday: '11am-2pm', afternoon: '2-5pm' };
   const arrivalTime = windowTimes[timeWindow] || timeWindow;
   
+  // Look up campaign by tracking number for proper marketing attribution
+  const campaign = await getCampaignByPhone(trackingNumber);
+  const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
+  const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
+  
   // Build detailed job summary
   const summaryParts = [
     issue,
@@ -337,7 +373,10 @@ async function createBooking(parsed, callerPhone) {
     `Updates Via: ${parsed.notification_preference || 'text'}`,
   ];
   if (parsed.promises_made) summaryParts.push(`Promises: ${parsed.promises_made}`);
+  if (trackingNumber) summaryParts.push(`Tracking #: ${trackingNumber}`);
   const jobSummary = summaryParts.join('\n');
+  
+  console.log('[POST-CALL] Using campaign:', campaignId, campaignName);
   
   const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
     customerId,
@@ -346,7 +385,7 @@ async function createBooking(parsed, callerPhone) {
     jobTypeId: isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE,
     priority: 'Normal',
     summary: jobSummary,
-    campaignId: CONFIG.CAMPAIGN_ID,
+    campaignId: campaignId,
     appointments: [{
       start: startUTC,
       end: endUTC,
@@ -468,13 +507,14 @@ module.exports = async (req, res) => {
     
     const transcript = call?.transcript;
     const callerPhone = call?.from_number;
+    const trackingNumber = call?.to_number; // The number the customer dialed (for marketing attribution)
     
     if (!transcript) {
       console.log('[POST-CALL] No transcript');
       return res.status(200).json({ status: 'skipped', reason: 'no transcript' });
     }
     
-    console.log('[POST-CALL] Processing call from:', callerPhone);
+    console.log('[POST-CALL] Processing call from:', callerPhone, 'to:', trackingNumber);
     
     const parsed = await parseTranscript(transcript, callerPhone);
     console.log('[POST-CALL] Parsed:', JSON.stringify(parsed, null, 2));
@@ -495,7 +535,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: 'duplicate', reason: 'already booked in last 5 min' });
       }
       
-      bookingResult = await createBooking(parsed, callerPhone);
+      bookingResult = await createBooking(parsed, callerPhone, trackingNumber);
     } else {
       console.log('[POST-CALL] should_book=false, no booking');
     }

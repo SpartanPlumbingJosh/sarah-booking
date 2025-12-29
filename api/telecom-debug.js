@@ -34,9 +34,9 @@ module.exports = async (req, res) => {
     const token = await getAccessToken();
     const phone = (req.query.phone || '9378067545').replace(/\D/g, '');
     
-    // Query telecom API for calls from this number
-    const response = await fetch(
-      `https://api.servicetitan.io/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=10`,
+    // Try v3 API - get calls from this number, most recent first
+    const v3Response = await fetch(
+      `https://api.servicetitan.io/telecom/v3/tenant/${CONFIG.ST_TENANT_ID}/calls?from=${phone}&sort=-CreatedOn&pageSize=10`,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -44,26 +44,43 @@ module.exports = async (req, res) => {
         }
       }
     );
+    const v3Data = await v3Response.json();
     
-    const data = await response.json();
-    
-    const calls = (data.data || []).map(c => ({
-      id: c.id,
-      createdOn: c.createdOn,
-      from: c.from,
-      to: c.to,
-      duration: c.duration,
-      direction: c.direction,
-      campaignId: c.campaign?.id || null,
-      campaignName: c.campaign?.name || null,
-      status: c.status
-    }));
+    // Also try the export endpoint for comparison
+    const exportResponse = await fetch(
+      `https://api.servicetitan.io/telecom/v2/tenant/${CONFIG.ST_TENANT_ID}/export/calls?from=2025-12-29&includeRecentChanges=true`,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'ST-App-Key': CONFIG.ST_APP_KEY
+        }
+      }
+    );
+    const exportData = await exportResponse.json();
     
     return res.json({
       searchPhone: phone,
-      totalCalls: data.data?.length || 0,
-      calls: calls,
-      rawFirst: data.data?.[0] || null
+      v3: {
+        total: v3Data.data?.length || 0,
+        calls: (v3Data.data || []).slice(0, 5).map(c => ({
+          id: c.id,
+          createdOn: c.createdOn,
+          from: c.from,
+          to: c.to,
+          campaign: c.campaign
+        })),
+        error: v3Data.error || v3Data.title || null
+      },
+      export: {
+        total: exportData.data?.length || 0,
+        recentCalls: (exportData.data || []).slice(0, 10).map(c => ({
+          id: c.id,
+          from: c.from,
+          to: c.to,
+          createdOn: c.createdOn,
+          campaign: c.campaign
+        }))
+      }
     });
   } catch (error) {
     return res.status(500).json({ error: error.message, stack: error.stack });

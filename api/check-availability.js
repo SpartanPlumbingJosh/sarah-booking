@@ -86,6 +86,8 @@ function getNextBusinessDays(count) {
 async function getCapacity(startDate, endDate) {
   const token = await getAccessToken();
   
+  console.log('[AVAILABILITY] Calling capacity API for', startDate, 'to', endDate);
+  
   const response = await fetch(
     `https://api-integration.servicetitan.io/dispatch/v2/tenant/${CONFIG.ST_TENANT_ID}/capacity`,
     {
@@ -103,7 +105,16 @@ async function getCapacity(startDate, endDate) {
     }
   );
   
-  const data = await response.json();
+  const responseText = await response.text();
+  console.log('[AVAILABILITY] API response status:', response.status);
+  
+  if (!response.ok) {
+    console.error('[AVAILABILITY] API error:', responseText.substring(0, 500));
+    return [];
+  }
+  
+  const data = JSON.parse(responseText);
+  console.log('[AVAILABILITY] Got', (data.availabilities || []).length, 'availabilities');
   return data.availabilities || [];
 }
 
@@ -219,3 +230,4 @@ module.exports = async (req, res) => {
     });
   }
 };
+

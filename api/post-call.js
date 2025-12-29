@@ -28,7 +28,7 @@ let tokenExpiry = 0;
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60000) return cachedToken;
   
-  const response = await fetch('https://auth-integration.servicetitan.io/connect/token', {
+  const response = await fetch('https://auth.servicetitan.io/connect/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -56,7 +56,7 @@ async function stApi(method, endpoint, body = null) {
   };
   if (body) options.body = JSON.stringify(body);
   
-  const response = await fetch(`https://api-integration.servicetitan.io${endpoint}`, options);
+  const response = await fetch(`https://api.servicetitan.io${endpoint}`, options);
   const responseText = await response.text();
   
   if (!response.ok) {
@@ -503,3 +503,4 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
+

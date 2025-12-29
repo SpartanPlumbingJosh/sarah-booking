@@ -13,7 +13,7 @@ const CONFIG = {
   BUSINESS_UNIT_DRAIN: 44665438,
   JOB_TYPE_SERVICE: 79273907,
   JOB_TYPE_DRAIN: 79265910,
-  CAMPAIGN_ID_FALLBACK: 313, // Sarah Voice AI - fallback if tracking number lookup fails
+  // No hardcoded fallback - campaign comes from tracking number lookup only
   
   ARRIVAL_WINDOWS: {
     morning: { startHour: 8, endHour: 11 },
@@ -310,8 +310,8 @@ async function createBooking(extracted, callerPhone, trackingNumber) {
   
   // Look up campaign from tracking number
   const campaign = await getCampaignByPhone(trackingNumber);
-  const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
-  const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
+  const campaignId = campaign ? campaign.id : null;
+  const campaignName = campaign ? campaign.name : 'Unknown';
   
   // Build job summary in ServiceTitan's exact field format
   const dispatchFee = extracted.dispatch_fee ? `$${extracted.dispatch_fee}` : '$79';
@@ -328,21 +328,28 @@ Other: `;
   
   console.log('[POST-CALL] Using campaign:', campaignId, campaignName);
   
-  const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, {
+  // Build job payload
+  const jobPayload = {
     customerId,
     locationId,
     businessUnitId: isDrain ? CONFIG.BUSINESS_UNIT_DRAIN : CONFIG.BUSINESS_UNIT_PLUMBING,
     jobTypeId: isDrain ? CONFIG.JOB_TYPE_DRAIN : CONFIG.JOB_TYPE_SERVICE,
     priority: 'Normal',
     summary: jobSummary,
-    campaignId: campaignId,
     appointments: [{
       start: startUTC,
       end: endUTC,
       arrivalWindowStart: startUTC,
       arrivalWindowEnd: endUTC
     }]
-  });
+  };
+  
+  // Only add campaignId if we have one from tracking number lookup
+  if (campaignId) {
+    jobPayload.campaignId = campaignId;
+  }
+  
+  const job = await stApi('POST', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs`, jobPayload);
   
   console.log('[POST-CALL] Job created:', job.id);
   

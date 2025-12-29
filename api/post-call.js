@@ -84,7 +84,6 @@ async function getCampaignByPhone(trackingNumber) {
   if (!trackingNumber) return null;
   
   try {
-    // Strip to just digits and remove leading 1 if present
     let phone = trackingNumber.replace(/\D/g, '');
     if (phone.length === 11 && phone.startsWith('1')) {
       phone = phone.slice(1);
@@ -97,10 +96,7 @@ async function getCampaignByPhone(trackingNumber) {
     if (result.data && result.data.length > 0) {
       const campaign = result.data[0];
       console.log('[POST-CALL] Found campaign:', campaign.id, campaign.name);
-      return {
-        id: campaign.id,
-        name: campaign.name
-      };
+      return { id: campaign.id, name: campaign.name };
     }
     
     console.log('[POST-CALL] No campaign found for tracking number:', phone);
@@ -110,62 +106,10 @@ async function getCampaignByPhone(trackingNumber) {
   return null;
 }
 
-async function parseTranscript(transcript, callerPhone) {
-  const cleanPhone = callerPhone ? callerPhone.replace(/\D/g, '') : '';
-  
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': CONFIG.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      messages: [{
-        role: 'user',
-        content: `Extract booking info from this plumbing call. Return ONLY valid JSON.
-
-Caller phone: ${cleanPhone}
-
-Transcript:
-${transcript}
-
-{
-  "should_book": true if agent said "you're all set" or confirmed an appointment. false if customer declined or hung up early,
-  "first_name": "string or null",
-  "last_name": "string or null", 
-  "phone": "Convert the phone number the customer SPOKE to digits (five=5, six=6, etc). Return exactly 10 digits. ONLY use ${cleanPhone} if they never stated a phone number",
-  "street": "street address THEY SAID on the call or null",
-  "city": "city THEY SAID on the call or null",
-  "state": "state or OH",
-  "zip": "zip code THEY SAID on the call or null",
-  "issue": "brief plumbing problem description",
-  "day": "day of week or null",
-  "time_window": "morning/midday/afternoon or null",
-  "is_new_customer": true if they said they've never used the service before,
-  "dispatch_fee": "79 if standard dispatch, 0 if economy/no-cost option, or null",
-  "notification_preference": "text or call - how they want to be notified",
-  "promises_made": "any specific promises the agent made or null"
-}
-
-IMPORTANT: Extract the address the customer SAID on the call, not any address the agent might have mentioned from their records.
-Return ONLY JSON.`
-      }]
-    })
-  });
-  
-  const data = await response.json();
-  const text = data.content[0].text.trim();
-  
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error('Failed to parse transcript');
-  }
+// Eastern timezone helpers
+function getEasternNow() {
+  const now = new Date();
+  return new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
 }
 
 function isDSTinEffect(year, month, day) {
@@ -184,190 +128,195 @@ function isDSTinEffect(year, month, day) {
   return false;
 }
 
-function easternToUTC(year, month, day, hour) {
-  const offset = isDSTinEffect(year, month, day) ? 4 : 5;
-  const utcHour = hour + offset;
-  let finalDay = day, finalMonth = month, finalYear = year, finalHour = utcHour;
-  
-  if (utcHour >= 24) {
-    finalHour = utcHour - 24;
-    const tempDate = new Date(Date.UTC(year, month - 1, day + 1));
-    finalYear = tempDate.getUTCFullYear();
-    finalMonth = tempDate.getUTCMonth() + 1;
-    finalDay = tempDate.getUTCDate();
-  }
-  
-  return `${finalYear}-${String(finalMonth).padStart(2, '0')}-${String(finalDay).padStart(2, '0')}T${String(finalHour).padStart(2, '0')}:00:00Z`;
-}
-
-function getNextBusinessDay(preferredDay) {
+function getNextBusinessDay(dayName, includeToday = true) {
   const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const now = new Date();
-  const easternNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  let targetDate = new Date(easternNow);
+  const easternNow = getEasternNow();
+  const currentDayOfWeek = easternNow.getDay();
+  const currentHour = easternNow.getHours();
   
-  if (preferredDay) {
-    const targetDayIndex = days.indexOf(preferredDay.toLowerCase());
-    if (targetDayIndex !== -1) {
-      let daysUntil = targetDayIndex - easternNow.getDay();
-      if (daysUntil <= 0) daysUntil += 7;
-      targetDate.setDate(easternNow.getDate() + daysUntil);
+  // Handle "today"
+  if (dayName && dayName.toLowerCase() === 'today') {
+    if (currentHour < 17) { // Before 5 PM
+      return {
+        year: easternNow.getFullYear(),
+        month: easternNow.getMonth() + 1,
+        day: easternNow.getDate(),
+        dayOfWeek: currentDayOfWeek
+      };
     } else {
-      targetDate.setDate(easternNow.getDate() + 1);
+      // After 5 PM, treat as tomorrow
+      dayName = 'tomorrow';
     }
-  } else {
-    targetDate.setDate(easternNow.getDate() + 1);
   }
   
-  while (targetDate.getDay() === 0 || targetDate.getDay() === 6) {
-    targetDate.setDate(targetDate.getDate() + 1);
+  // Handle "tomorrow"
+  if (dayName && dayName.toLowerCase() === 'tomorrow') {
+    const tomorrow = new Date(easternNow);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return {
+      year: tomorrow.getFullYear(),
+      month: tomorrow.getMonth() + 1,
+      day: tomorrow.getDate(),
+      dayOfWeek: tomorrow.getDay()
+    };
   }
+  
+  // Handle day of week
+  const targetDay = days.indexOf(dayName?.toLowerCase());
+  if (targetDay === -1) {
+    // Default to tomorrow
+    const tomorrow = new Date(easternNow);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return {
+      year: tomorrow.getFullYear(),
+      month: tomorrow.getMonth() + 1,
+      day: tomorrow.getDate(),
+      dayOfWeek: tomorrow.getDay()
+    };
+  }
+  
+  let daysUntil = targetDay - currentDayOfWeek;
+  if (daysUntil < 0) daysUntil += 7;
+  if (daysUntil === 0 && (!includeToday || currentHour >= 17)) daysUntil = 7;
+  
+  const targetDate = new Date(easternNow);
+  targetDate.setDate(targetDate.getDate() + daysUntil);
   
   return {
     year: targetDate.getFullYear(),
     month: targetDate.getMonth() + 1,
     day: targetDate.getDate(),
-    dayOfWeek: targetDate.getDay()
+    dayOfWeek: targetDay
   };
 }
 
-
-// Check if we already booked this call (same customer, same day, in last 5 min)
-async function alreadyBooked(customerId, appointmentDate) {
+async function alreadyBooked(customerId) {
   try {
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const jobs = await stApi('GET', `/jpm/v2/tenant/${CONFIG.ST_TENANT_ID}/jobs?customerId=${customerId}&createdOnOrAfter=${fiveMinAgo}&pageSize=5`);
     
     if (jobs.data && jobs.data.length > 0) {
       console.log('[POST-CALL] Found', jobs.data.length, 'recent jobs for customer', customerId);
-      return true; // Already booked in last 5 min
+      return true;
     }
     return false;
   } catch (error) {
     console.error('[POST-CALL] Dedupe check failed:', error.message);
-    return false; // On error, proceed with booking
+    return false;
   }
 }
 
-// Use CALLER ID for customer lookup, spoken phone for contact info
-async function createBooking(parsed, callerPhone, trackingNumber) {
-  // Caller ID for existing customer lookup
+async function createBooking(extracted, callerPhone, trackingNumber) {
+  // Use extracted data from Retell's post-call analysis
   const callerDigits = callerPhone ? callerPhone.replace(/\D/g, '') : '';
   const lookupPhone = callerDigits.length === 11 && callerDigits.startsWith('1') 
     ? callerDigits.slice(1) : callerDigits;
   
-  // Spoken phone for contact (fallback to caller ID)
-  const spokenPhone = parsed.phone ? parsed.phone.replace(/\D/g, '') : '';
+  const spokenPhone = extracted.customer_phone ? extracted.customer_phone.replace(/\D/g, '') : '';
   const contactPhone = spokenPhone || lookupPhone;
   
-  // ALWAYS use what they said on the call
-  let street = parsed.street;
-  let city = parsed.city;
-  let state = parsed.state || 'OH';
-  // Normalize state to 2-letter code
-  const stateMap = {'ohio': 'OH', 'indiana': 'IN', 'kentucky': 'KY', 'michigan': 'MI', 'west virginia': 'WV', 'pennsylvania': 'PA'};
-  if (state && state.length > 2) {
-    state = stateMap[state.toLowerCase()] || 'OH';
-  }
-  let zip = parsed.zip;
+  let street = extracted.customer_street;
+  let city = extracted.customer_city;
+  let state = 'OH';
+  let zip = extracted.customer_zip;
   
-  // Build customer name from what they said
-  let customerName = parsed.last_name 
-    ? `${parsed.first_name || 'Customer'} ${parsed.last_name}` 
-    : (parsed.first_name || 'Customer');
+  let customerName = extracted.customer_last_name 
+    ? `${extracted.customer_first_name || 'Customer'} ${extracted.customer_last_name}` 
+    : (extracted.customer_first_name || 'Customer');
   
   let customerId = null;
   let locationId = null;
   
-  // Check for existing customer by phone
+  // Check for existing customer
   const existingCustomer = await findCustomerByPhone(lookupPhone);
   if (existingCustomer) {
     customerId = existingCustomer.id;
     console.log('[POST-CALL] Found existing customer:', customerId, existingCustomer.name);
     
-    // Use existing customer name if we didn't get one
-    if (!parsed.first_name) {
-      customerName = existingCustomer.name;
+    if (!extracted.customer_first_name) {
+      customerName = existingCustomer.name || customerName;
     }
     
-    // ONLY use ST address as fallback if we got NOTHING from the call
-    const stAddr = existingCustomer.address || {};
-    if (!street && !city && !zip) {
-      console.log('[POST-CALL] No address from call, using ST address');
-      street = stAddr.street;
-      city = stAddr.city;
-      zip = stAddr.zip;
-      if (stAddr.state) state = stAddr.state;
-      
-      // Use existing location
+    // Get existing location
+    try {
       const locations = await stApi('GET', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations?customerId=${customerId}&pageSize=1`);
-      if (locations.data?.length > 0) {
-        locationId = locations.data[0].id;
+      if (locations.data && locations.data.length > 0) {
+        const existingLoc = locations.data[0];
+        locationId = existingLoc.id;
+        
+        if (!street) street = existingLoc.address?.street;
+        if (!city) city = existingLoc.address?.city;
+        if (!zip) zip = existingLoc.address?.zip;
       }
-    } else {
-      // They gave us an address - create NEW location for this address
-      console.log('[POST-CALL] Using address from call, creating new location');
+    } catch (e) {
+      console.log('[POST-CALL] Could not fetch existing location');
     }
   }
-  
-  // DEFAULTS if still missing
-  if (!street) street = 'NEEDS ADDRESS';
-  if (!city) city = 'NEEDS CITY';
-  if (!zip) zip = '45402';
   
   // Create new customer if needed
   if (!customerId) {
-    console.log('[POST-CALL] Creating new customer:', customerName);
-    const customerResult = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
+    const nameParts = customerName.split(' ');
+    const newCustomer = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/customers`, {
       name: customerName,
       type: 'Residential',
-      address: { street, city, state, zip, country: 'USA' },
-      contacts: [{ type: 'MobilePhone', value: contactPhone }],
-      locations: [{
-        name: customerName,
-        address: { street, city, state, zip, country: 'USA' },
-        contacts: [{ type: 'MobilePhone', value: contactPhone }]
+      address: { street: street || 'TBD', city: city || 'Dayton', state, zip: zip || '45402', country: 'USA' },
+      contacts: [{
+        type: 'Phone',
+        value: contactPhone,
+        memo: 'Primary'
       }]
     });
-    customerId = customerResult.id;
-    locationId = customerResult.locations[0].id;
+    customerId = newCustomer.id;
+    console.log('[POST-CALL] Created customer:', customerId);
   }
   
-  // Create new location if we have customer but no location (new address for existing customer)
+  // Create location if needed
   if (!locationId) {
-    console.log('[POST-CALL] Creating new location for existing customer');
-    const newLoc = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
+    const newLocation = await stApi('POST', `/crm/v2/tenant/${CONFIG.ST_TENANT_ID}/locations`, {
       customerId,
       name: customerName,
-      address: { street, city, state, zip, country: 'USA' },
-      contacts: [{ type: 'MobilePhone', value: contactPhone }]
+      address: { street: street || 'TBD', city: city || 'Dayton', state, zip: zip || '45402', country: 'USA' },
+      contacts: [{
+        type: 'Phone',
+        value: contactPhone,
+        memo: 'Primary'
+      }]
     });
-    locationId = newLoc.id;
+    locationId = newLocation.id;
+    console.log('[POST-CALL] Created location:', locationId);
   }
   
-  const apptDate = getNextBusinessDay(parsed.day);
-  const timeWindow = parsed.time_window || 'morning';
-  const window = CONFIG.ARRIVAL_WINDOWS[timeWindow] || CONFIG.ARRIVAL_WINDOWS.morning;
-  const startUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.startHour);
-  const endUTC = easternToUTC(apptDate.year, apptDate.month, apptDate.day, window.endHour);
+  // Determine service type
+  const isDrain = extracted.is_drain_issue === true;
+  const issue = extracted.issue_description || 'Service call';
   
-  const issue = parsed.issue || 'Service call - see transcript';
-  const isDrain = /drain|sewer|clog|backup|snake/i.test(issue);
+  // Get appointment date
+  const timeWindow = (extracted.booked_time_window || 'morning').toLowerCase();
+  const apptDate = getNextBusinessDay(extracted.booked_day, true);
   
   const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const arrivalDay = dayNames[apptDate.dayOfWeek];
-  const windowTimes = { morning: '8-11am', midday: '11am-2pm', afternoon: '2-5pm' };
+  
+  // Calculate UTC times
+  const window = CONFIG.ARRIVAL_WINDOWS[timeWindow] || CONFIG.ARRIVAL_WINDOWS.morning;
+  const isDST = isDSTinEffect(apptDate.year, apptDate.month, apptDate.day);
+  const offsetHours = isDST ? 4 : 5;
+  
+  const startUTC = new Date(Date.UTC(apptDate.year, apptDate.month - 1, apptDate.day, window.startHour + offsetHours, 0, 0)).toISOString();
+  const endUTC = new Date(Date.UTC(apptDate.year, apptDate.month - 1, apptDate.day, window.endHour + offsetHours, 0, 0)).toISOString();
+  
+  const windowTimes = { morning: '8-11 AM', midday: '11 AM-2 PM', afternoon: '2-5 PM' };
   const arrivalTime = windowTimes[timeWindow] || timeWindow;
   
-  // Look up campaign by tracking number for proper marketing attribution
+  // Look up campaign from tracking number
   const campaign = await getCampaignByPhone(trackingNumber);
   const campaignId = campaign ? campaign.id : CONFIG.CAMPAIGN_ID_FALLBACK;
   const campaignName = campaign ? campaign.name : 'Sarah Voice AI';
   
   // Build job summary in ServiceTitan's exact field format
-  const dispatchFee = parsed.dispatch_fee ? `$${parsed.dispatch_fee}` : '$79';
-  const promisesMade = parsed.promises_made || '';
-  const updatesVia = parsed.notification_preference || 'text';
+  const dispatchFee = extracted.dispatch_fee ? `$${extracted.dispatch_fee}` : '$79';
+  const promisesMade = extracted.promises_made || '';
+  const updatesVia = extracted.notification_preference || 'text';
   
   const jobSummary = `Job Description: ${issue}
 Expected Arrival Time: ${arrivalTime}
@@ -398,10 +347,10 @@ Other: `;
   console.log('[POST-CALL] Job created:', job.id);
   
   const missingData = [];
-  if (!parsed.street) missingData.push('address');
-  if (!parsed.city) missingData.push('city');
-  if (!parsed.zip) missingData.push('zip');
-  if (!parsed.first_name) missingData.push('name');
+  if (!street) missingData.push('address');
+  if (!city) missingData.push('city');
+  if (!zip) missingData.push('zip');
+  if (!extracted.customer_first_name) missingData.push('name');
   
   return {
     success: true,
@@ -409,14 +358,15 @@ Other: `;
     customer_id: customerId,
     location_id: locationId,
     customer_name: customerName,
-    address: `${street}, ${city}, ${state} ${zip}`,
-    day: dayNames[apptDate.dayOfWeek],
+    address: `${street || 'TBD'}, ${city || 'Dayton'}, ${state} ${zip || ''}`,
+    day: arrivalDay,
     time_window: timeWindow,
+    campaign: campaignName,
     missing_data: missingData.length > 0 ? missingData : null
   };
 }
 
-async function postToSlack(call, parsed, bookingResult) {
+async function postToSlack(call, extracted, bookingResult) {
   if (!CONFIG.SLACK_BOT_TOKEN || !CONFIG.SLACK_TRANSCRIPT_CHANNEL) return;
   
   try {
@@ -431,48 +381,49 @@ async function postToSlack(call, parsed, bookingResult) {
     if (bookingResult?.success) {
       headerEmoji = '✅';
       headerText = 'Booked';
-      statusText = `Job #${bookingResult.job_id} | ${bookingResult.day} ${bookingResult.time_window}`;
+      statusText = `Job #${bookingResult.job_id} | ${bookingResult.day} ${bookingResult.time_window} | ${bookingResult.campaign}`;
       if (bookingResult.missing_data) {
         headerEmoji = '⚠️';
         statusText += ` | MISSING: ${bookingResult.missing_data.join(', ')}`;
       }
-    } else if (parsed?.should_book === false) {
+    } else if (extracted?.should_book === false) {
       headerEmoji = '🟡';
-      headerText = 'No Booking';
-      statusText = 'Customer did not confirm appointment';
+      headerText = 'Not Booked';
+      statusText = 'Customer did not book';
     } else {
-      headerEmoji = '❌';
-      headerText = 'Failed';
-      statusText = 'Booking failed - check logs';
+      headerEmoji = '🔴';
+      headerText = 'Error';
+      statusText = 'Booking failed';
     }
     
-    // Format phone as 555-555-1234
-    const formatPhone = (p) => {
-      const digits = String(p).replace(/\D/g, '');
-      if (digits.length === 10) return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
-      if (digits.length === 11 && digits.startsWith('1')) return `${digits.slice(1,4)}-${digits.slice(4,7)}-${digits.slice(7)}`;
-      return p;
-    };
-    
-    const customerName = bookingResult?.customer_name || [parsed?.first_name, parsed?.last_name].filter(Boolean).join(' ') || 'Unknown';
-    const address = bookingResult?.address || [parsed?.street, parsed?.city, parsed?.state, parsed?.zip].filter(Boolean).join(', ') || 'Not provided';
     const callerID = call?.from_number || 'Unknown';
-    const spokenPhone = parsed?.phone || null;
-    const callerDigits = callerID.replace(/\D/g, '');
-    const spokenDigits = spokenPhone ? spokenPhone.replace(/\D/g, '') : null;
-    const phoneDisplay = spokenDigits 
-      ? (spokenDigits !== callerDigits ? `${formatPhone(spokenDigits)} (caller ID: ${formatPhone(callerDigits)})` : formatPhone(spokenDigits)) 
-      : formatPhone(callerID);
-    const recordingUrl = call?.recording_url || null;
+    const trackingNum = call?.to_number || 'Unknown';
     
-    let messageText = `${headerEmoji} *${headerText}*\n\n*Name:* ${customerName}\n*Address:* ${address}\n*Phone:* ${phoneDisplay}\n*Issue:* ${parsed?.issue || 'N/A'}\n\n⏱️ ${durationStr} | ${statusText}`;
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `${headerEmoji} ${headerText}`, emoji: true }
+      },
+      {
+        type: 'section',
+        fields: [
+          { type: 'mrkdwn', text: `*Caller:* ${callerID}` },
+          { type: 'mrkdwn', text: `*Tracking #:* ${trackingNum}` },
+          { type: 'mrkdwn', text: `*Duration:* ${durationStr}` },
+          { type: 'mrkdwn', text: `*Status:* ${statusText}` }
+        ]
+      },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*Issue:* ${extracted?.issue_description || 'N/A'}` }
+      },
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `\`\`\`${transcript.substring(0, 2500)}\`\`\`` }
+      }
+    ];
     
-    if (recordingUrl) {
-      messageText += `\n\n🎧 <${recordingUrl}|Listen to Recording>`;
-    }
-    
-    messageText += `\n\n*Transcript:*\n\`\`\`${transcript.slice(0, 2800)}${transcript.length > 2800 ? '...' : ''}\`\`\``;
-
     await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
@@ -481,14 +432,11 @@ async function postToSlack(call, parsed, bookingResult) {
       },
       body: JSON.stringify({
         channel: CONFIG.SLACK_TRANSCRIPT_CHANNEL,
-        text: messageText,
-        mrkdwn: true
+        blocks
       })
     });
-    
-    console.log('[POST-CALL] Posted to Slack');
-  } catch (err) {
-    console.error('[POST-CALL] Slack error:', err.message);
+  } catch (error) {
+    console.error('[POST-CALL] Slack post failed:', error.message);
   }
 }
 
@@ -501,32 +449,26 @@ module.exports = async (req, res) => {
     
     console.log('[POST-CALL] Event:', event, 'Call ID:', callId);
     
-    // ONLY process call_ended - ignore call_analyzed to prevent double booking
-    if (event !== 'call_ended') {
-      return res.status(200).json({ status: 'ignored', reason: 'only processing call_ended' });
+    // Process call_analyzed event (has the extracted data we need)
+    if (event !== 'call_analyzed') {
+      return res.status(200).json({ status: 'ignored', reason: 'waiting for call_analyzed' });
     }
     
     const transcript = call?.transcript;
     const callerPhone = call?.from_number;
-    const trackingNumber = call?.to_number; // The number the customer dialed (for marketing attribution)
+    const trackingNumber = call?.to_number;
     
-    if (!transcript) {
-      console.log('[POST-CALL] No transcript');
-      return res.status(200).json({ status: 'skipped', reason: 'no transcript' });
-    }
+    // Get extracted data from Retell's post-call analysis
+    const customAnalysis = call?.call_analysis?.custom_analysis_data || {};
     
     console.log('[POST-CALL] Processing call from:', callerPhone, 'to:', trackingNumber);
-    
-    const parsed = await parseTranscript(transcript, callerPhone);
-    console.log('[POST-CALL] Parsed:', JSON.stringify(parsed, null, 2));
+    console.log('[POST-CALL] Extracted data:', JSON.stringify(customAnalysis, null, 2));
     
     let bookingResult = null;
     
-    if (parsed.should_book) {
+    if (customAnalysis.should_book === true) {
       console.log('[POST-CALL] should_book=true, checking for duplicates...');
       
-      // Check if already booked (prevents double booking from webhook retries)
-      // Use CALLER ID for lookup (same as createBooking)
       const callerDigits = callerPhone ? callerPhone.replace(/\D/g, '') : '';
       const lookupPhone = callerDigits.length === 11 && callerDigits.startsWith('1') ? callerDigits.slice(1) : callerDigits;
       const existingCustomer = await findCustomerByPhone(lookupPhone);
@@ -536,16 +478,16 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: 'duplicate', reason: 'already booked in last 5 min' });
       }
       
-      bookingResult = await createBooking(parsed, callerPhone, trackingNumber);
+      bookingResult = await createBooking(customAnalysis, callerPhone, trackingNumber);
     } else {
-      console.log('[POST-CALL] should_book=false, no booking');
+      console.log('[POST-CALL] should_book=false or missing, no booking');
     }
     
-    await postToSlack(call, parsed, bookingResult);
+    await postToSlack(call, customAnalysis, bookingResult);
     
     return res.status(200).json({
       status: bookingResult?.success ? 'booked' : 'not_booked',
-      parsed,
+      extracted: customAnalysis,
       booking: bookingResult
     });
     
@@ -554,6 +496,3 @@ module.exports = async (req, res) => {
     return res.status(200).json({ status: 'error', error: error.message });
   }
 };
-
-
-

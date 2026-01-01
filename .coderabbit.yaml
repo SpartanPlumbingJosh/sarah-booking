@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+tone_instructions: "Be strict about security. BLOCK any PR with hardcoded secrets, API keys, tokens, or credentials. These must ALWAYS be environment variables."
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_instructions:
+    - path: "**/*.ts"
+      instructions: |
+        CRITICAL: Check for hardcoded secrets. Flag and BLOCK if found:
+        - API keys (sk-, api_, key_, token_, AKIA)
+        - Database URLs with passwords
+        - Slack tokens (xoxb-, xoxp-)
+        - Stripe keys (sk_live_, sk_test_)
+        - Any string that looks like a credential
+        All secrets MUST use process.env.VARIABLE_NAME
+    - path: "**/*.js"
+      instructions: |
+        CRITICAL: Check for hardcoded secrets. Flag and BLOCK if found:
+        - API keys, tokens, passwords
+        - Database connection strings
+        All secrets MUST use process.env.VARIABLE_NAME
+    - path: "**/*.py"
+      instructions: |
+        CRITICAL: Check for hardcoded secrets. Flag and BLOCK if found:
+        - API keys, tokens, passwords  
+        - Database credentials
+        All secrets MUST use os.environ or config files
+    - path: "**/*.env*"
+      instructions: |
+        NEVER commit real secrets. Only .env.example with placeholders is OK.
+
+  tools:
+    gitleaks:
+      enabled: true
+
+  pre_merge_checks:
+    custom_checks:
+      - name: "No Hardcoded Secrets"
+        mode: "error"
+        instructions: |
+          FAIL this check if ANY of these are found hardcoded (not from environment variables):
+          - API keys or tokens (patterns: sk-, api_, key_, token_, xoxb-, xoxp-, AKIA, ghp_)
+          - Database connection strings with embedded passwords
+          - Client secrets or signing keys
+          - Any string that appears to be a credential
+          
+          PASS only if all sensitive values come from environment variables (process.env, os.environ, etc.)
+
+chat:
+  auto_reply: true
